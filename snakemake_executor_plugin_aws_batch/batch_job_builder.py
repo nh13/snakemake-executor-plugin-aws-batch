@@ -122,10 +122,25 @@ class BatchJobBuilder:
             else:
                 raise WorkflowError(f"Invalid vCPU value {vcpu} for memory {mem} MB on Fargate")
         else:
-            min_mem = min([m for m, v in VALID_RESOURCES_MAPPING.items() if vcpu in v])
+            valid_mems = [m for m, v in VALID_RESOURCES_MAPPING.items() if vcpu in v]
+            if not valid_mems:
+                raise WorkflowError(
+                    f"Invalid vCPU value {vcpu} for Fargate. "
+                    f"Check valid Fargate resource configurations."
+                )
+            # Pick the smallest valid memory that still satisfies the request.
+            # Picking min(valid_mems) unconditionally would silently shrink
+            # e.g. mem=5000 down to 2048 and OOM the job.
+            candidate_mems = [m for m in valid_mems if m >= mem]
+            if not candidate_mems:
+                raise WorkflowError(
+                    f"Memory value {mem} MB exceeds the maximum allowed for "
+                    f"vCPU {vcpu} on Fargate."
+                )
+            min_mem = min(candidate_mems)
             self.logger.warning(
                 f"Memory value {mem} MB is invalid for vCPU {vcpu} on Fargate. "
-                f"Setting memory to minimum allowed value {min_mem} MB."
+                f"Setting memory to next allowed value {min_mem} MB."
             )
             return str(vcpu), str(min_mem)
 
