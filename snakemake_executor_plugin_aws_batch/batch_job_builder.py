@@ -1,3 +1,4 @@
+import os
 import uuid
 from typing import List
 from botocore.exceptions import ClientError
@@ -10,6 +11,8 @@ from snakemake_executor_plugin_aws_batch.constant import (
     BATCH_JOB_PLATFORM_CAPABILITIES,
     BATCH_JOB_RESOURCE_REQUIREMENT_TYPE,
 )
+
+SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR = "SNAKEMAKE_AWS_BATCH_JOB_TAGS"
 
 
 class BatchJobBuilder:
@@ -242,6 +245,47 @@ class BatchJobBuilder:
         except Exception as e:
             raise WorkflowError(f"Failed to register job definition: {e}") from e
 
+    def _build_job_tags(self) -> dict:
+        """Build the tags dict for job submission.
+
+        Merges tags from settings with those from the SNAKEMAKE_AWS_BATCH_JOB_TAGS
+        environment variable (comma-separated KEY=VALUE pairs). Environment variable
+        tags take precedence over settings tags on key conflicts.
+
+        Empty keys (from malformed env input like ``=value``) are rejected with
+        a WorkflowError. AWS Batch caps a job at 50 tags; exceeding that also
+        raises locally so the job fails fast instead of at submit_job time.
+
+        :return: Merged tags dict (may be empty).
+        """
+        tags: dict = dict(self.settings.tags) if isinstance(self.settings.tags, dict) else {}
+        for key in tags:
+            if not key or not key.strip():
+                raise WorkflowError(
+                    "Invalid tags in settings: tag key cannot be empty."
+                )
+
+        env_tags_str = os.environ.get(SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR, "")
+        if env_tags_str:
+            for pair in env_tags_str.split(","):
+                pair = pair.strip()
+                if "=" in pair:
+                    key, _, value = pair.partition("=")
+                    key = key.strip()
+                    if not key:
+                        raise WorkflowError(
+                            f"Invalid {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR}: "
+                            "tag key cannot be empty."
+                        )
+                    tags[key] = value.strip()
+
+        if len(tags) > 50:
+            raise WorkflowError(
+                f"AWS Batch jobs support at most 50 tags, got {len(tags)}."
+            )
+
+        return tags
+
     def submit(self):
         job_def, job_name = self.build_job_definition()
 
@@ -252,6 +296,10 @@ class BatchJobBuilder:
                 job_def["jobDefinitionName"], job_def["revision"]
             ),
         }
+
+        tags = self._build_job_tags()
+        if tags:
+            job_params["tags"] = tags
 
         try:
             submitted = self.batch_client.submit_job(**job_params)
