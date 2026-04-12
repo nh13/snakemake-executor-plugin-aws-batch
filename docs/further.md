@@ -65,6 +65,24 @@ snakemake --jobs 4 \
     --verbose
 ```
 
+# Job Tags
+
+Tags from `--aws-batch-tags` are applied to every job definition and job
+submitted by the plugin. In addition, dynamic tags can be supplied via the
+`SNAKEMAKE_AWS_BATCH_JOB_TAGS` environment variable as comma-separated
+`KEY=VALUE` pairs:
+
+```
+export SNAKEMAKE_AWS_BATCH_JOB_TAGS="run_id=2024-06-01,team=genomics"
+```
+
+Environment variable tags are merged with `--aws-batch-tags` and take
+precedence on key conflicts. This enables per-run cost tracking: a
+coordinator job can set the variable so that all child jobs it submits
+inherit the run-specific tags. AWS Batch allows at most 50 tags per job;
+malformed pairs (missing `=` or an empty key) raise an error at submission
+time.
+
 
 
 
