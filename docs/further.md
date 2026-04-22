@@ -65,6 +65,22 @@ snakemake --jobs 4 \
     --verbose
 ```
 
+# Per-Rule Job Queues
+
+By default all jobs are submitted to the queue given by
+`--aws-batch-job-queue`. A rule can override this with the `batch_queue`
+resource, e.g. to route jobs to a queue wired to a different compute
+environment (ARM vs x86, GPU vs CPU):
+
+```python
+rule align:
+    resources:
+        batch_queue="arn:aws:batch:us-west-2:123456789012:job-queue/arm-queue"
+    ...
+```
+
+Platform detection and job submission both use the resolved per-rule queue.
+
 # Job Tags
 
 Tags from `--aws-batch-tags` are applied to every job definition and job

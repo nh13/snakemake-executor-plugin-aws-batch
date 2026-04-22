@@ -143,9 +143,9 @@ class Executor(RemoteExecutor):
             )
             job_info = job_definition.submit()
             log_info = {
-                "job_name:": job_info["jobName"],
+                "job_name": job_info["jobName"],
                 "jobId": job_info["jobId"],
-                "job_queue": self.settings.job_queue,
+                "job_queue": job_definition.job_queue,
             }
             self.logger.debug(f"AWS Batch job submitted: {log_info}")
         except Exception as e:

@@ -200,6 +200,30 @@ class TestSubmitTagPropagation:
             _, call_args = self._run_submit(builder)
         assert _extract_tags(call_args) == {"Team": "data"}
 
+    def test_default_queue_passed_to_submit_job(self):
+        builder = _make_builder(tags=None)
+        _, call_args = self._run_submit(builder)
+        assert call_args.kwargs["jobQueue"] == "test-queue"
+
+    def test_per_rule_queue_override_passed_to_submit_job(self):
+        """resources.batch_queue must route the job to the override queue."""
+        template = _make_builder(tags=None)
+        job = MagicMock()
+        job.name = "test_rule"
+        job.threads = 1
+        job.resources = {"_cores": 1, "mem_mb": 1024, "batch_queue": "override-queue"}
+        builder = BatchJobBuilder(
+            logger=MagicMock(),
+            job=job,
+            envvars={},
+            container_image="test-image:latest",
+            settings=template.settings,
+            job_command="snakemake ...",
+            batch_client=template.batch_client,
+        )
+        _, call_args = self._run_submit(builder)
+        assert call_args.kwargs["jobQueue"] == "override-queue"
+
 
 def _extract_tags(call_args) -> dict | None:
     """Extract the 'tags' value from a mock call_args, or None if not present."""
@@ -400,6 +424,66 @@ class TestBuildJobTagsValidation:
         builder = _make_builder(tags=fifty)
         result = builder._build_job_tags()
         assert len(result) == 50
+
+
+# ---------------------------------------------------------------------------
+# Tests for error messages — resolved per-job queue
+# ---------------------------------------------------------------------------
+
+
+class TestErrorMessagesUseResolvedQueue:
+    """Diagnostics must show the resolved per-job queue (resources.batch_queue
+    override), not the profile-wide default from settings."""
+
+    def _make_job_with_queue_override(self):
+        job = MagicMock()
+        job.name = "test_rule"
+        job.threads = 1
+        job.resources = {"_cores": 1, "mem_mb": 1024, "batch_queue": "override-queue"}
+        return job
+
+    def _make_settings(self):
+        return SimpleNamespace(
+            job_queue="default-queue",
+            job_role="arn:aws:iam::123456789:role/test-role",
+            tags=None,
+            task_timeout=300,
+        )
+
+    def test_platform_detection_error_reports_resolved_queue(self):
+        """ClientError diagnostics must name the per-job override queue."""
+        batch_client = MagicMock()
+        batch_client.describe_job_queues.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "no perm"}},
+            "DescribeJobQueues",
+        )
+        with pytest.raises(WorkflowError, match="override-queue"):
+            BatchJobBuilder(
+                logger=MagicMock(),
+                job=self._make_job_with_queue_override(),
+                envvars={},
+                container_image="test-image:latest",
+                settings=self._make_settings(),
+                job_command="snakemake ...",
+                batch_client=batch_client,
+            )
+
+    def test_fargate_rejection_reports_resolved_queue(self):
+        """The Fargate fail-fast message must name the per-job override queue."""
+        batch_client = MagicMock()
+        batch_client.describe_job_queues.return_value = {"jobQueues": []}
+        builder = BatchJobBuilder(
+            logger=MagicMock(),
+            job=self._make_job_with_queue_override(),
+            envvars={},
+            container_image="test-image:latest",
+            settings=self._make_settings(),
+            job_command="snakemake ...",
+            batch_client=batch_client,
+        )
+        builder.platform = BATCH_JOB_PLATFORM_CAPABILITIES.FARGATE.value
+        with pytest.raises(WorkflowError, match="override-queue"):
+            builder.build_job_definition()
 
 
 # ---------------------------------------------------------------------------
