@@ -65,6 +65,18 @@ snakemake --jobs 4 \
     --verbose
 ```
 
+# Container Image Requirements
+
+The plugin does **not** auto-deploy the default storage provider to workers
+(`auto_deploy_default_storage_provider=False`): workers no longer run
+`pip install snakemake-storage-plugin-s3` at startup, because that pulls an
+unpinned version whose newer releases require snakemake >= 9 and break
+workers running snakemake 8.x. The container image used for jobs must
+therefore pre-install a compatible version of the storage plugin (e.g.
+`snakemake-storage-plugin-s3`) alongside snakemake itself. Image maintainers
+are responsible for pinning a plugin version compatible with the snakemake
+version in the image.
+
 # Per-Rule Job Queues
 
 By default all jobs are submitted to the queue given by
