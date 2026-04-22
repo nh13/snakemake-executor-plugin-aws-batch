@@ -34,6 +34,12 @@ class BatchJobBuilder:
         self.job_command = job_command
         self.batch_client = batch_client
         self.created_job_defs = []
+        # Per-rule queue override via `resources.batch_queue` — lets a multi-arch
+        # workflow route each job to a queue wired to matching compute environment
+        # (e.g. ARM vs x86). Falls back to the profile-wide default queue.
+        self.job_queue = str(
+            self.job.resources.get("batch_queue", self.settings.job_queue)
+        )
         # Determine platform from job queue
         self.platform = self._get_platform_from_queue()
 
@@ -52,12 +58,12 @@ class BatchJobBuilder:
         try:
             # Query the job queue
             queue_response = self.batch_client.describe_job_queues(
-                jobQueues=[self.settings.job_queue]
+                jobQueues=[self.job_queue]
             )
 
             if not queue_response.get("jobQueues"):
                 self.logger.warning(
-                    f"Job queue {self.settings.job_queue} not found. Defaulting to EC2."
+                    f"Job queue {self.job_queue} not found. Defaulting to EC2."
                 )
                 return BATCH_JOB_PLATFORM_CAPABILITIES.EC2.value
 
@@ -66,7 +72,7 @@ class BatchJobBuilder:
 
             if not compute_env_order:
                 self.logger.warning(
-                    f"No compute environments found for queue {self.settings.job_queue}. "
+                    f"No compute environments found for queue {self.job_queue}. "
                     "Defaulting to EC2."
                 )
                 return BATCH_JOB_PLATFORM_CAPABILITIES.EC2.value
@@ -94,12 +100,12 @@ class BatchJobBuilder:
 
             if resource_type in ["FARGATE", "FARGATE_SPOT"]:
                 self.logger.info(
-                    f"Detected FARGATE platform from queue {self.settings.job_queue}"
+                    f"Detected FARGATE platform from queue {self.job_queue}"
                 )
                 return BATCH_JOB_PLATFORM_CAPABILITIES.FARGATE.value
             else:
                 self.logger.info(
-                    f"Detected EC2 platform from queue {self.settings.job_queue}"
+                    f"Detected EC2 platform from queue {self.job_queue}"
                 )
                 return BATCH_JOB_PLATFORM_CAPABILITIES.EC2.value
 
@@ -291,7 +297,7 @@ class BatchJobBuilder:
 
         job_params = {
             "jobName": job_name,
-            "jobQueue": self.settings.job_queue,
+            "jobQueue": self.job_queue,
             "jobDefinition": "{}:{}".format(
                 job_def["jobDefinitionName"], job_def["revision"]
             ),
