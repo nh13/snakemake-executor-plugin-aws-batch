@@ -96,8 +96,12 @@ common_settings = CommonSettings(
     # and pass them e.g. as secrets to the execution backend)
     pass_envvar_declarations_to_cmd=False,
     # whether the default storage provider shall be deployed before the job is run on
-    # the remote node. Usually set to True if the executor does not assume a shared fs
-    auto_deploy_default_storage_provider=True,
+    # the remote node. Set to False so workers do NOT `pip install
+    # snakemake-storage-plugin-s3` at startup: that pulls unpinned versions whose
+    # newer PyPI metadata requires snakemake-interface-storage-plugins >= 4 and
+    # breaks snakemake 8.x. Users must pre-install a compatible plugin version
+    # in the container image.
+    auto_deploy_default_storage_provider=False,
     # specify initial amount of seconds to sleep before checking for job status
     init_seconds_before_status_checks=0,
 )
