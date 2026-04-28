@@ -235,6 +235,17 @@ class BatchJobBuilder:
                 }
             )
 
+        # Optional /dev/shm sizing. POSIX shm_open writes there; the EC2/ECS
+        # default is 64 MB which is too small for tools that stage large
+        # in-memory indexes (e.g. bwa-mem2 shm). Rules opt in via
+        # `resources.shared_memory_size_mb`. Only applies on EC2 — Fargate
+        # does not honor linuxParameters.sharedMemorySize.
+        shm_size_mb = self.job.resources.get("shared_memory_size_mb")
+        if shm_size_mb and self.platform == BATCH_JOB_PLATFORM_CAPABILITIES.EC2.value:
+            container_properties["linuxParameters"] = {
+                "sharedMemorySize": int(shm_size_mb),
+            }
+
         timeout = {"attemptDurationSeconds": self.settings.task_timeout}
         tags = self.settings.tags if isinstance(self.settings.tags, dict) else dict()
         try:
