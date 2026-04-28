@@ -487,6 +487,57 @@ class TestErrorMessagesUseResolvedQueue:
 
 
 # ---------------------------------------------------------------------------
+# Tests for build_job_definition — shared_memory_size_mb
+# ---------------------------------------------------------------------------
+
+
+class TestSharedMemorySize:
+    def _build_with_shm(self, shm_value):
+        builder = _make_builder(tags=None)
+        builder.job.resources = dict(
+            builder.job.resources, shared_memory_size_mb=shm_value
+        )
+        builder.batch_client.register_job_definition.return_value = _fake_job_def()
+        return builder
+
+    def test_shm_size_sets_linux_parameters(self):
+        builder = self._build_with_shm(4096)
+        builder.build_job_definition()
+        props = builder.batch_client.register_job_definition.call_args.kwargs[
+            "containerProperties"
+        ]
+        assert props["linuxParameters"] == {"sharedMemorySize": 4096}
+
+    def test_shm_size_accepts_string_values(self):
+        """Snakemake resources may arrive as strings; ints must still come out."""
+        builder = self._build_with_shm("2048")
+        builder.build_job_definition()
+        props = builder.batch_client.register_job_definition.call_args.kwargs[
+            "containerProperties"
+        ]
+        assert props["linuxParameters"] == {"sharedMemorySize": 2048}
+
+    def test_unset_shm_size_omits_linux_parameters(self):
+        builder = _make_builder(tags=None)
+        builder.batch_client.register_job_definition.return_value = _fake_job_def()
+        builder.build_job_definition()
+        props = builder.batch_client.register_job_definition.call_args.kwargs[
+            "containerProperties"
+        ]
+        assert "linuxParameters" not in props
+
+    def test_non_numeric_shm_size_raises_workflow_error(self):
+        builder = self._build_with_shm("4g")
+        with pytest.raises(WorkflowError, match="shared_memory_size_mb"):
+            builder.build_job_definition()
+
+    def test_negative_shm_size_raises_workflow_error(self):
+        builder = self._build_with_shm(-64)
+        with pytest.raises(WorkflowError, match="positive"):
+            builder.build_job_definition()
+
+
+# ---------------------------------------------------------------------------
 # Tests for build_job_definition — Fargate rejection
 # ---------------------------------------------------------------------------
 

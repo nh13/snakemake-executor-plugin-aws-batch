@@ -93,6 +93,23 @@ rule align:
 
 Platform detection and job submission both use the resolved per-rule queue.
 
+# Shared Memory (`/dev/shm`)
+
+On EC2/ECS containers `/dev/shm` defaults to 64 MB, which is too small for
+tools that stage large in-memory indexes (e.g. bwa-mem2 shared-memory
+indexes). A rule can enlarge it via the `shared_memory_size_mb` resource:
+
+```python
+rule align:
+    resources:
+        shared_memory_size_mb=4096
+    ...
+```
+
+This sets `linuxParameters.sharedMemorySize` on the job definition. It only
+applies on EC2 queues — Fargate does not honor
+`linuxParameters.sharedMemorySize`, so the resource is ignored there.
+
 # Job Tags
 
 Tags from `--aws-batch-tags` are applied to every job definition and job
@@ -110,6 +127,22 @@ coordinator job can set the variable so that all child jobs it submits
 inherit the run-specific tags. AWS Batch allows at most 50 tags per job;
 malformed pairs (missing `=` or an empty key) raise an error at submission
 time.
+
+# Shared Memory (/dev/shm) Sizing
+
+Containers on EC2/ECS default to a 64 MB `/dev/shm`, which is too small for
+tools that stage large in-memory indexes via POSIX shared memory (e.g.
+`bwa-mem2` shm mode). A rule can request a larger `/dev/shm` with the
+`shared_memory_size_mb` resource:
+
+```python
+rule align:
+    resources:
+        shared_memory_size_mb=32768
+    ...
+```
+
+This s
 
 
 
