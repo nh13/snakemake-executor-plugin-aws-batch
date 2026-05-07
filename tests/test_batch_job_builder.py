@@ -376,3 +376,48 @@ class TestBuildJobDefinitionFargateRejection:
         job_def, job_name = builder.build_job_definition()
         assert job_def["jobDefinitionName"] == "snakejob-def-test"
         assert job_name.startswith("snakejob-test_rule-")
+
+
+# ---------------------------------------------------------------------------
+# Tests for resources.container_image override (per-rule image selection)
+# ---------------------------------------------------------------------------
+
+
+class TestContainerImageOverride:
+    """`resources.container_image` override on the job-definition's
+    containerProperties.image. Mirrors the existing batch_queue and
+    shared_memory_size_mb override pattern."""
+
+    def _build_and_capture_image(self, builder: BatchJobBuilder) -> str:
+        """Drive build_job_definition() through and return the image string
+        passed to register_job_definition's containerProperties."""
+        builder.batch_client.register_job_definition.return_value = {
+            "jobDefinitionName": "snakejob-def-test",
+            "revision": 1,
+        }
+        builder.build_job_definition()
+        call_kwargs = builder.batch_client.register_job_definition.call_args.kwargs
+        return call_kwargs["containerProperties"]["image"]
+
+    def test_falls_back_to_settings_when_no_resource(self):
+        """Without `resources.container_image`, settings.container_image is used.
+        This is the existing single-image behavior."""
+        builder = _make_builder(tags=None)
+        # _make_builder seeds resources = {"_cores": 1, "mem_mb": 1024} — no
+        # container_image key. settings.container_image is "test-image:latest".
+        assert "container_image" not in builder.job.resources
+        image = self._build_and_capture_image(builder)
+        assert image == "test-image:latest"
+
+    def test_resource_overrides_settings(self):
+        """When `resources.container_image` is set on the rule, it takes
+        precedence over settings.container_image. Lets a multi-arch workflow
+        pin different ECR tags per Batch queue."""
+        builder = _make_builder(tags=None)
+        per_rule_image = (
+            "550079046206.dkr.ecr.us-east-1.amazonaws.com/bwa-mem3-bench:abc-avx512bw"
+        )
+        builder.job.resources["container_image"] = per_rule_image
+        image = self._build_and_capture_image(builder)
+        assert image == per_rule_image
+        assert image != "test-image:latest"

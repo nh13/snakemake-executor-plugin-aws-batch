@@ -209,7 +209,17 @@ class BatchJobBuilder:
             environment = [{"name": k, "value": v} for k, v in self.envvars.items()]
 
         container_properties = {
-            "image": self.container_image,
+            # Per-rule image override via `resources.container_image` — lets
+            # a multi-arch workflow pin different ECR images per Batch queue
+            # (e.g. avx2-baselined image for c6a workers, avx512bw-baselined
+            # image for c7a / c7i / m7i). Falls back to the executor's
+            # profile-level container-image (`self.container_image`) when
+            # the resource is unset, so existing single-image workflows are
+            # unaffected. Mirrors the resources.batch_queue and
+            # resources.shared_memory_size_mb override pattern below.
+            "image": self.job.resources.get(
+                "container_image", self.container_image
+            ),
             # command requires a list of strings (docker CMD format)
             "command": self._make_container_command(self.job_command),
             "environment": environment,
