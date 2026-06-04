@@ -26,6 +26,7 @@ from snakemake_executor_plugin_aws_batch.constant import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_builder(tags=None) -> BatchJobBuilder:
     """Return a BatchJobBuilder with minimal mocks.
 
@@ -71,6 +72,7 @@ def _fake_job_def():
 # Tests for _build_job_tags
 # ---------------------------------------------------------------------------
 
+
 class TestBuildJobTags:
     def test_none_settings_tags_returns_empty(self):
         builder = _make_builder(tags=None)
@@ -95,27 +97,35 @@ class TestBuildJobTags:
 
     def test_env_var_tags_parsed_and_merged(self):
         builder = _make_builder(tags={"Env": "prod"})
-        with patch.dict(os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data,Cost=low"}):
+        with patch.dict(
+            os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data,Cost=low"}
+        ):
             result = builder._build_job_tags()
         assert result == {"Env": "prod", "Team": "data", "Cost": "low"}
 
     def test_env_var_tags_override_settings_tags_on_conflict(self):
         builder = _make_builder(tags={"Env": "prod", "Team": "bio"})
-        with patch.dict(os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data"}):
+        with patch.dict(
+            os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data"}
+        ):
             result = builder._build_job_tags()
         assert result["Team"] == "data"
         assert result["Env"] == "prod"
 
     def test_env_var_only_no_settings_tags(self):
         builder = _make_builder(tags=None)
-        with patch.dict(os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Owner=alice"}):
+        with patch.dict(
+            os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Owner=alice"}
+        ):
             result = builder._build_job_tags()
         assert result == {"Owner": "alice"}
 
     def test_env_var_with_value_containing_equals(self):
         """A VALUE that itself contains '=' should be handled (key=rest of string)."""
         builder = _make_builder(tags=None)
-        with patch.dict(os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Url=http://x=1"}):
+        with patch.dict(
+            os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Url=http://x=1"}
+        ):
             result = builder._build_job_tags()
         assert result == {"Url": "http://x=1"}
 
@@ -127,7 +137,9 @@ class TestBuildJobTags:
 
     def test_trailing_comma_tolerated(self):
         builder = _make_builder(tags=None)
-        with patch.dict(os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Env=prod,"}):
+        with patch.dict(
+            os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Env=prod,"}
+        ):
             result = builder._build_job_tags()
         assert result == {"Env": "prod"}
 
@@ -148,7 +160,11 @@ class TestBuildJobTags:
 
     def test_absent_env_var_ignored(self):
         builder = _make_builder(tags={"Env": "prod"})
-        env = {k: v for k, v in os.environ.items() if k != SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k != SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR
+        }
         with patch.dict(os.environ, env, clear=True):
             result = builder._build_job_tags()
         assert result == {"Env": "prod"}
@@ -158,6 +174,7 @@ class TestBuildJobTags:
 # Tests for submit() — tags propagation to batch_client.submit_job
 # ---------------------------------------------------------------------------
 
+
 class TestSubmitTagPropagation:
     def _run_submit(self, builder: BatchJobBuilder):
         """Patch build_job_definition and submit_job, then call submit()."""
@@ -166,7 +183,11 @@ class TestSubmitTagPropagation:
             "jobId": "abc-123",
             "jobQueue": "test-queue",
         }
-        with patch.object(builder, "build_job_definition", return_value=(_fake_job_def(), "snakejob-test")):
+        with patch.object(
+            builder,
+            "build_job_definition",
+            return_value=(_fake_job_def(), "snakejob-test"),
+        ):
             return builder.submit(), builder.batch_client.submit_job.call_args
 
     def test_tags_from_settings_passed_to_submit_job(self):
@@ -176,27 +197,37 @@ class TestSubmitTagPropagation:
 
     def test_env_var_tags_passed_to_submit_job(self):
         builder = _make_builder(tags=None)
-        with patch.dict(os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data"}):
+        with patch.dict(
+            os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data"}
+        ):
             _, call_args = self._run_submit(builder)
         assert _extract_tags(call_args) == {"Team": "data"}
 
     def test_merged_tags_passed_to_submit_job(self):
         builder = _make_builder(tags={"Env": "prod"})
-        with patch.dict(os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data"}):
+        with patch.dict(
+            os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data"}
+        ):
             _, call_args = self._run_submit(builder)
         assert _extract_tags(call_args) == {"Env": "prod", "Team": "data"}
 
     def test_no_tags_key_in_job_params_when_empty(self):
         """When tags is empty, 'tags' should not appear in submit_job call."""
         builder = _make_builder(tags=None)
-        env = {k: v for k, v in os.environ.items() if k != SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k != SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR
+        }
         with patch.dict(os.environ, env, clear=True):
             _, call_args = self._run_submit(builder)
         assert _extract_tags(call_args) is None
 
     def test_env_var_overrides_settings_in_submit_job(self):
         builder = _make_builder(tags={"Team": "bio"})
-        with patch.dict(os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data"}):
+        with patch.dict(
+            os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data"}
+        ):
             _, call_args = self._run_submit(builder)
         assert _extract_tags(call_args) == {"Team": "data"}
 
@@ -267,7 +298,7 @@ class TestGetPlatformFromQueue:
         )
 
     def test_client_error_propagates(self):
-        """ClientError from describe_job_queues must not be swallowed as EC2 fallback."""
+        """ClientError from describe_job_queues must not become an EC2 fallback."""
         batch_client = MagicMock()
         batch_client.describe_job_queues.side_effect = ClientError(
             {"Error": {"Code": "AccessDeniedException", "Message": "no perm"}},
@@ -338,7 +369,7 @@ class TestValidateFargateResources:
         assert (vcpu_str, mem_str) == ("1", "4096")
 
     def test_raises_when_request_exceeds_max_for_vcpu(self):
-        """vcpu=1 maxes out at 8192 MB; requesting 99999 must raise, not silently shrink."""
+        """vcpu=1 maxes at 8192 MB; requesting 99999 must raise, not shrink."""
         builder = _make_builder(tags=None)
         builder.platform = BATCH_JOB_PLATFORM_CAPABILITIES.FARGATE.value
         with pytest.raises(WorkflowError, match="exceeds the maximum"):
@@ -361,7 +392,9 @@ class TestJobDefinitionTags:
         """register_job_definition must get the same validated, env-merged tags."""
         builder = _make_builder(tags={"Env": "prod"})
         builder.batch_client.register_job_definition.return_value = _fake_job_def()
-        with patch.dict(os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data"}):
+        with patch.dict(
+            os.environ, {SNAKEMAKE_AWS_BATCH_JOB_TAGS_ENV_VAR: "Team=data"}
+        ):
             builder.build_job_definition()
         call_kwargs = builder.batch_client.register_job_definition.call_args.kwargs
         assert call_kwargs["tags"] == {"Env": "prod", "Team": "data"}
@@ -544,7 +577,7 @@ class TestSharedMemorySize:
 
 class TestBuildJobDefinitionFargateRejection:
     def test_fargate_platform_raises_workflow_error(self):
-        """build_job_definition must reject Fargate until container properties are wired."""
+        """build_job_definition must reject Fargate until properties are wired."""
         builder = _make_builder(tags=None)
         builder.platform = BATCH_JOB_PLATFORM_CAPABILITIES.FARGATE.value
         with pytest.raises(WorkflowError, match="Fargate"):

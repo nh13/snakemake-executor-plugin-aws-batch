@@ -86,7 +86,8 @@ class BatchClient:
         """
         Describe compute environments in AWS Batch.
 
-        :param kwargs: The keyword arguments to pass to the describe_compute_environments method.
+        :param kwargs: The keyword arguments to pass to
+            describe_compute_environments.
         :return: The response from the describe_compute_environments method.
         """
         return self.client.describe_compute_environments(**kwargs)

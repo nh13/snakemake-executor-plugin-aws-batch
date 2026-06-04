@@ -51,7 +51,8 @@ class BatchJobBuilder:
 
     def _get_platform_from_queue(self) -> str:
         """
-        Determine the platform (EC2 or FARGATE) from the job queue's compute environments.
+        Determine the platform (EC2 or FARGATE) from the job queue's
+        compute environments.
 
         :return: Platform capability string (EC2 or FARGATE)
         """
@@ -87,14 +88,16 @@ class BatchJobBuilder:
 
             if not env_response.get("computeEnvironments"):
                 self.logger.warning(
-                    f"Compute environment {compute_env_arn} not found. Defaulting to EC2."
+                    f"Compute environment {compute_env_arn} not found. "
+                    "Defaulting to EC2."
                 )
                 return BATCH_JOB_PLATFORM_CAPABILITIES.EC2.value
 
             compute_env = env_response["computeEnvironments"][0]
 
             # Check if it's a Fargate environment
-            # Fargate environments have computeResources.type == "FARGATE" or "FARGATE_SPOT"
+            # Fargate environments have computeResources.type ==
+            # "FARGATE" or "FARGATE_SPOT"
             compute_resources = compute_env.get("computeResources", {})
             resource_type = compute_resources.get("type", "")
 
@@ -104,9 +107,7 @@ class BatchJobBuilder:
                 )
                 return BATCH_JOB_PLATFORM_CAPABILITIES.FARGATE.value
             else:
-                self.logger.info(
-                    f"Detected EC2 platform from queue {self.job_queue}"
-                )
+                self.logger.info(f"Detected EC2 platform from queue {self.job_queue}")
                 return BATCH_JOB_PLATFORM_CAPABILITIES.EC2.value
 
         except ClientError as e:
@@ -115,8 +116,7 @@ class BatchJobBuilder:
             # explicit empty-response branches above where AWS replied
             # successfully but the resource is missing.
             raise WorkflowError(
-                f"Failed to determine platform from queue "
-                f"{self.job_queue}: {e}"
+                f"Failed to determine platform from queue " f"{self.job_queue}: {e}"
             ) from e
 
     def _validate_fargate_resources(self, vcpu: int, mem: int) -> tuple[str, str]:
@@ -129,7 +129,9 @@ class BatchJobBuilder:
             if vcpu in VALID_RESOURCES_MAPPING[mem]:
                 return str(vcpu), str(mem)
             else:
-                raise WorkflowError(f"Invalid vCPU value {vcpu} for memory {mem} MB on Fargate")
+                raise WorkflowError(
+                    f"Invalid vCPU value {vcpu} for memory {mem} MB on Fargate"
+                )
         else:
             valid_mems = [m for m, v in VALID_RESOURCES_MAPPING.items() if vcpu in v]
             if not valid_mems:
@@ -198,7 +200,12 @@ class BatchJobBuilder:
         # Validate and convert resources
         gpu = max(0, int(self.job.resources.get("_gpus", 0)))
         # Use threads directive, fall back to _cores for backward compatibility
-        vcpu = max(1, self.job.threads if self.job.threads > 0 else int(self.job.resources.get("_cores", 1)))
+        vcpu = max(
+            1,
+            self.job.threads
+            if self.job.threads > 0
+            else int(self.job.resources.get("_cores", 1)),
+        )
         mem = max(1, int(self.job.resources.get("mem_mb", 1024)))  # Default to 1024 MiB
 
         vcpu_str, mem_str = self._validate_resources(str(vcpu), str(mem))
@@ -292,7 +299,9 @@ class BatchJobBuilder:
 
         :return: Merged tags dict (may be empty).
         """
-        tags: dict = dict(self.settings.tags) if isinstance(self.settings.tags, dict) else {}
+        tags: dict = (
+            dict(self.settings.tags) if isinstance(self.settings.tags, dict) else {}
+        )
         for key in tags:
             if not key or not key.strip():
                 raise WorkflowError(
