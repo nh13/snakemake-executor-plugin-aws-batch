@@ -173,6 +173,18 @@ and never affect the workflow:
   detection falls back to a lower-confidence status-reason heuristic.
 - Surfacing the tail of a failed job's logs in the error message:
   `logs:GetLogEvents`. Without it, only the Batch `statusReason` is shown.
+- Verifying the configured job role exists during the startup preflight check:
+  `iam:GetRole`. Without it, role verification is skipped (a wrong role still
+  fails clearly at job submission).
+
+## Preflight validation
+
+At startup the executor verifies the job queue is `ENABLED`/`VALID` and its
+compute environment(s) are `ENABLED`/`VALID` with `maxvCpus > 0`, and (if
+`iam:GetRole` is available) that the job role exists. A confirmed
+misconfiguration fails fast with a clear error before any job is submitted;
+uncertain state (a transient API error or a missing describe permission) is
+treated as a warning and the workflow proceeds.
 
 ## Stuck-job diagnosis
 

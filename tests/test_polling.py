@@ -19,9 +19,11 @@ class _AsyncNullContext:
 
 
 def _executor(**settings):
+    base = {"region": "us-east-1", "job_queue": "arn:q"}
+    base.update(settings)
     ex = Executor.__new__(Executor)
     ex.logger = MagicMock()
-    ex.settings = SimpleNamespace(region="us-east-1", job_queue="arn:q", **settings)
+    ex.settings = SimpleNamespace(**base)
     return ex
 
 
@@ -294,3 +296,162 @@ class TestDiagnoseQueueCapacity:
         ex.batch_client = MagicMock()
         ex.batch_client.describe_job_queues.side_effect = Exception("boom")
         assert "could not diagnose" in ex._diagnose_queue_capacity()
+
+
+class TestPreflightValidate:
+    def _ex(self, queue, compute_envs=None):
+        ex = _executor()
+        ex.batch_client = MagicMock()
+        ex.batch_client.describe_job_queues.return_value = {
+            "jobQueues": [queue] if queue else []
+        }
+        ex.batch_client.describe_compute_environments.return_value = {
+            "computeEnvironments": compute_envs or []
+        }
+        return ex
+
+    def test_healthy_passes(self):
+        ex = self._ex(
+            {"state": "ENABLED", "status": "VALID", "computeEnvironmentOrder": []},
+        )
+        ex._validate_job_role = MagicMock()
+        ex._preflight_validate()  # must not raise
+        ex._validate_job_role.assert_called_once()
+
+    def test_disabled_queue_raises(self):
+        from snakemake_interface_common.exceptions import WorkflowError
+
+        ex = self._ex({"state": "DISABLED", "computeEnvironmentOrder": []})
+        try:
+            ex._preflight_validate()
+            assert False, "expected WorkflowError"
+        except WorkflowError as e:
+            assert "DISABLED" in str(e)
+
+    def test_uncertain_state_does_not_raise(self):
+        # API error -> _queue_problems returns None -> preflight proceeds to role check.
+        ex = _executor()
+        ex.batch_client = MagicMock()
+        ex.batch_client.describe_job_queues.side_effect = Exception("throttled")
+        ex._validate_job_role = MagicMock()
+        ex._preflight_validate()  # must not raise
+        ex._validate_job_role.assert_called_once()
+
+    def test_no_queue_configured_does_not_raise(self):
+        ex = _executor(job_queue=None)
+        ex._validate_job_role = MagicMock()
+        ex._preflight_validate()
+
+    def test_maxvcpus_zero_raises(self):
+        from snakemake_interface_common.exceptions import WorkflowError
+
+        ex = self._ex(
+            {
+                "state": "ENABLED",
+                "computeEnvironmentOrder": [{"computeEnvironment": "ce1"}],
+            },
+            compute_envs=[
+                {
+                    "computeEnvironmentName": "ce1",
+                    "state": "ENABLED",
+                    "status": "VALID",
+                    "computeResources": {"maxvCpus": 0},
+                }
+            ],
+        )
+        try:
+            ex._preflight_validate()
+            assert False, "expected WorkflowError"
+        except WorkflowError as e:
+            assert "maxvCpus=0" in str(e)
+
+    def test_transient_updating_status_does_not_raise(self):
+        # A queue mid-update (status UPDATING) is recoverable and must NOT abort.
+        ex = self._ex(
+            {"state": "ENABLED", "status": "UPDATING", "computeEnvironmentOrder": []}
+        )
+        ex._validate_job_role = MagicMock()
+        ex._preflight_validate()  # must not raise
+
+    def test_propagates_missing_role(self):
+        from snakemake_interface_common.exceptions import WorkflowError
+        from botocore.exceptions import ClientError
+
+        ex = self._ex(
+            {"state": "ENABLED", "status": "VALID", "computeEnvironmentOrder": []}
+        )
+        ex.settings.job_role = "arn:aws:iam::1:role/missing"
+        ex._aws_clients = {
+            "iam": MagicMock(
+                get_role=MagicMock(
+                    side_effect=ClientError(
+                        {"Error": {"Code": "NoSuchEntity"}}, "GetRole"
+                    )
+                )
+            )
+        }
+        try:
+            ex._preflight_validate()
+            assert False, "expected WorkflowError"
+        except WorkflowError as e:
+            assert "does not exist" in str(e)
+
+
+class TestValidateJobRole:
+    def _client_error(self, code):
+        from botocore.exceptions import ClientError
+
+        return ClientError({"Error": {"Code": code}}, "GetRole")
+
+    def test_missing_role_raises(self):
+        from snakemake_interface_common.exceptions import WorkflowError
+
+        ex = _executor(job_role="arn:aws:iam::1:role/missing")
+        ex._aws_clients = {
+            "iam": MagicMock(
+                get_role=MagicMock(side_effect=self._client_error("NoSuchEntity"))
+            )
+        }
+        try:
+            ex._validate_job_role()
+            assert False, "expected WorkflowError"
+        except WorkflowError as e:
+            assert "does not exist" in str(e)
+
+    def test_access_denied_degrades(self):
+        ex = _executor(job_role="arn:aws:iam::1:role/maybe")
+        ex._aws_clients = {
+            "iam": MagicMock(
+                get_role=MagicMock(side_effect=self._client_error("AccessDenied"))
+            )
+        }
+        ex._validate_job_role()  # must not raise
+
+    def test_existing_role_passes(self):
+        ex = _executor(job_role="arn:aws:iam::1:role/good")
+        ex._aws_clients = {
+            "iam": MagicMock(get_role=MagicMock(return_value={"Role": {}}))
+        }
+        ex._validate_job_role()
+        ex._aws_clients["iam"].get_role.assert_called_once_with(RoleName="good")
+
+    def test_no_role_is_noop(self):
+        ex = _executor(job_role=None)
+        ex._validate_job_role()  # must not raise, no client needed
+
+
+class TestAttemptHistory:
+    def test_single_attempt_none(self):
+        assert Executor._attempt_history({"attempts": [{"statusReason": "x"}]}) is None
+        assert Executor._attempt_history({}) is None
+
+    def test_multiple_attempts_summarized(self):
+        job_info = {
+            "attempts": [
+                {"statusReason": "Spot interruption"},
+                {"container": {"reason": "Essential container exited"}},
+            ]
+        }
+        history = Executor._attempt_history(job_info)
+        assert "attempt 1: Spot interruption" in history
+        assert "attempt 2: Essential container exited" in history

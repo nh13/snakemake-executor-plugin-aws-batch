@@ -26,6 +26,11 @@ from snakemake_interface_common.exceptions import WorkflowError
 # diagnose the queue/compute environment and warn that it may be stuck.
 RUNNABLE_STUCK_SECONDS = 300
 
+# Batch queue/compute-environment `status` values that definitively prevent jobs
+# from running. CREATING/UPDATING are transient and must NOT fail the preflight
+# check (a queue mid-update is recoverable), so only these abort.
+FATAL_BATCH_STATUSES = frozenset({"INVALID", "DELETING", "DELETED"})
+
 
 # Optional:
 # Define additional settings for your executor.
@@ -142,6 +147,10 @@ class Executor(RemoteExecutor):
             self.batch_client = BatchClient(region_name=self.settings.region)
         except Exception as e:
             raise WorkflowError(f"Failed to initialize AWS Batch client: {e}") from e
+
+        # Fail fast on a definitively misconfigured queue/compute environment/role
+        # before submitting any jobs (degrades to a no-op if state is uncertain).
+        self._preflight_validate()
 
     def run_job(self, job: JobExecutorInterface):
         # Implement here how to run a job.
@@ -289,6 +298,9 @@ class Executor(RemoteExecutor):
                 return 0, None
             elif job_status == "FAILED":
                 reason = job_info.get("statusReason", "Unknown reason")
+                retry_history = self._attempt_history(job_info)
+                if retry_history:
+                    reason = f"{reason}\nRetry history: {retry_history}"
                 log_tail = self._failure_log_tail(job_info)
                 if log_tail:
                     reason = f"{reason}\n--- last CloudWatch log lines ---\n{log_tail}"
@@ -355,6 +367,25 @@ class Executor(RemoteExecutor):
             self.logger.debug(f"could not fetch CloudWatch log tail: {e}")
             return None
 
+    @staticmethod
+    def _attempt_history(job_info: dict) -> Optional[str]:
+        """Summarize per-attempt failure reasons for a retried job, or None.
+
+        A job that failed after retries shows only its final ``statusReason``;
+        the earlier attempts' reasons (e.g. a Spot reclamation on attempt 1) live
+        in ``attempts[]``. Surfacing them makes the retry story legible. Returns
+        None for single-attempt jobs.
+        """
+        attempts = job_info.get("attempts") or []
+        if len(attempts) <= 1:
+            return None
+        parts = []
+        for i, attempt in enumerate(attempts, start=1):
+            container = attempt.get("container") or {}
+            why = attempt.get("statusReason") or container.get("reason") or "unknown"
+            parts.append(f"attempt {i}: {why}")
+        return "; ".join(parts)
+
     def _maybe_warn_stuck(self, job: SubmittedJobInfo, job_status: str) -> None:
         """Warn once if a job has waited (not running) beyond the stuck threshold.
 
@@ -388,46 +419,113 @@ class Executor(RemoteExecutor):
         )
         job.aux["_stuck_warned"] = True
 
-    def _diagnose_queue_capacity(self) -> str:
-        """Diagnose why jobs may not be starting, from the queue/compute env state."""
+    def _queue_problems(self) -> Optional[List[str]]:
+        """Return definitive job-queue / compute-environment misconfigurations.
+
+        Returns an empty list when everything looks healthy, a non-empty list of
+        problem descriptions when the queue or a compute environment is in a state
+        that would prevent jobs from ever starting (disabled/invalid, maxvCpus=0),
+        or None when the state can't be determined (no queue configured, or an API
+        error — never block the workflow on a transient failure).
+        """
+        queue_arn = getattr(self.settings, "job_queue", None)
+        if not queue_arn:
+            return None
         try:
-            queue_arn = getattr(self.settings, "job_queue", None)
-            if not queue_arn:
-                return "(no job queue configured)"
             queues = self.batch_client.describe_job_queues(jobQueues=[queue_arn]).get(
                 "jobQueues", []
             )
             if not queues:
-                return "Job queue not found."
+                return ["job queue not found"]
             jq = queues[0]
+            problems: List[str] = []
             if jq.get("state") != "ENABLED":
-                return f"Likely cause: job queue is {jq.get('state')} (not ENABLED)."
+                problems.append(f"job queue is {jq.get('state')} (not ENABLED)")
+            if jq.get("status") in FATAL_BATCH_STATUSES:
+                problems.append(f"job queue status is {jq.get('status')}")
             ce_arns = [
                 o.get("computeEnvironment")
                 for o in jq.get("computeEnvironmentOrder", [])
             ]
-            ces = self.batch_client.describe_compute_environments(
-                computeEnvironments=[c for c in ce_arns if c]
-            ).get("computeEnvironments", [])
-            problems = []
-            for ce in ces:
-                name = ce.get("computeEnvironmentName", "?")
-                if ce.get("state") != "ENABLED":
-                    problems.append(f"compute environment {name} is {ce.get('state')}")
-                if ce.get("status") not in (None, "VALID"):
-                    problems.append(
-                        f"compute environment {name} status is {ce.get('status')}"
-                    )
-                if (ce.get("computeResources") or {}).get("maxvCpus") == 0:
-                    problems.append(f"compute environment {name} has maxvCpus=0")
-            if problems:
-                return "Likely cause: " + "; ".join(problems) + "."
-            return (
-                "Compute environment looks healthy; capacity may be saturated or no "
-                "matching instance type is currently available."
+            ce_arns = [c for c in ce_arns if c]
+            if ce_arns:
+                ces = self.batch_client.describe_compute_environments(
+                    computeEnvironments=ce_arns
+                ).get("computeEnvironments", [])
+                for ce in ces:
+                    name = ce.get("computeEnvironmentName", "?")
+                    if ce.get("state") != "ENABLED":
+                        problems.append(
+                            f"compute environment {name} is {ce.get('state')}"
+                        )
+                    if ce.get("status") in FATAL_BATCH_STATUSES:
+                        problems.append(
+                            f"compute environment {name} status is {ce.get('status')}"
+                        )
+                    if (ce.get("computeResources") or {}).get("maxvCpus") == 0:
+                        problems.append(f"compute environment {name} has maxvCpus=0")
+            return problems
+        except Exception as e:
+            self.logger.debug(f"could not check job queue / compute environment: {e}")
+            return None
+
+    def _diagnose_queue_capacity(self) -> str:
+        """Diagnose why jobs may not be starting, from the queue/compute env state."""
+        problems = self._queue_problems()
+        if problems is None:
+            return "(could not diagnose queue capacity)"
+        if problems:
+            return "Likely cause: " + "; ".join(problems) + "."
+        return (
+            "Compute environment looks healthy; capacity may be saturated or no "
+            "matching instance type is currently available."
+        )
+
+    def _preflight_validate(self) -> None:
+        """Fail fast on a definitively misconfigured queue / compute environment / role.
+
+        Best-effort about *uncertainty*: a transient API error or missing
+        describe permission degrades to a warning and the workflow proceeds. Only
+        a confirmed-bad configuration (disabled/invalid queue or compute
+        environment, maxvCpus=0, or a non-existent job role) raises, before any
+        job is submitted.
+        """
+        problems = self._queue_problems()
+        if problems:
+            raise WorkflowError(
+                "AWS Batch preflight check failed — jobs would never start: "
+                + "; ".join(problems)
+                + ". Check the configured --aws-batch-job-queue and its compute "
+                "environment(s)."
+            )
+        self._validate_job_role()
+
+    def _validate_job_role(self) -> None:
+        """Verify the configured job role exists (best-effort; needs iam:GetRole).
+
+        A confirmed-missing role (``NoSuchEntity``) fails fast; anything else
+        (most importantly a missing ``iam:GetRole`` permission) degrades silently.
+        """
+        from botocore.exceptions import ClientError
+
+        role_arn = getattr(self.settings, "job_role", None)
+        if not role_arn or "/" not in role_arn:
+            return
+        # GetRole takes the bare role name, not the IAM path: for
+        # arn:aws:iam::<acct>:role/<path>/<name> the name is the final segment.
+        role_name = role_arn.rsplit("/", 1)[-1]
+        try:
+            self._aws_client("iam").get_role(RoleName=role_name)
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "NoSuchEntity":
+                raise WorkflowError(
+                    f"Configured AWS Batch job role does not exist: {role_arn}"
+                ) from e
+            self.logger.debug(
+                f"could not verify job role (likely missing iam:GetRole): {e}"
             )
         except Exception as e:
-            return f"(could not diagnose queue capacity: {e})"
+            self.logger.debug(f"could not verify job role: {e}")
 
     def _emit_snakesee_state(self, job: SubmittedJobInfo, job_info: dict) -> None:
         """Emit a snakesee remote-state event when the job's phase changes.
@@ -492,7 +590,7 @@ class Executor(RemoteExecutor):
             return None
 
     def _aws_client(self, service: str):
-        """Lazily create and cache a boto3 client for a service (ec2/ecs)."""
+        """Lazily create and cache a boto3 client for a service (e.g. ec2/ecs/iam/logs)."""
         cache = self.__dict__.setdefault("_aws_clients", {})
         if service not in cache:
             import boto3
