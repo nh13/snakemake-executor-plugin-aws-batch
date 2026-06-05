@@ -122,6 +122,15 @@ class TestBuildPayload:
         payload = snakesee_remote.build_payload(7, "abc", info)
         assert "termination_category" not in payload
 
+    def test_cost_estimate_merged_when_provided(self):
+        info = _job_info("SUCCEEDED", stoppedAt=200000)
+        payload = snakesee_remote.build_payload(7, "abc", info, cost_estimate=0.1234)
+        assert payload["cost_estimate"] == 0.1234
+
+    def test_no_cost_key_when_absent(self):
+        info = _job_info("SUCCEEDED", stoppedAt=200000)
+        assert "cost_estimate" not in snakesee_remote.build_payload(7, "abc", info)
+
     def test_optional_fields_omitted_when_absent(self):
         # A bare queued job with no timestamps/queue still produces a minimal payload.
         info = {"status": "SUBMITTED", "container": {}}

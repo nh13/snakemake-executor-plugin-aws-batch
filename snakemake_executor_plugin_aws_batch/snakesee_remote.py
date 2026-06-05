@@ -57,6 +57,7 @@ def build_payload(
     job_info: dict,
     region: Optional[str] = None,
     termination: Optional[dict] = None,
+    cost_estimate: Optional[float] = None,
 ) -> Optional[dict]:
     """Build the snakesee remote-state payload from a describe_jobs entry.
 
@@ -67,6 +68,7 @@ def build_payload(
         region: AWS region, used by snakesee to build console deep links.
         termination: Optional ``{termination_category, termination_source,
             termination_confidence}`` classification for a failed job.
+        cost_estimate: Optional estimated USD cost for a finished job.
 
     Returns:
         The payload dict, or None if the Batch status can't be mapped to a phase,
@@ -139,6 +141,9 @@ def build_payload(
             value = termination.get(key)
             if value is not None:
                 payload[key] = value
+
+    if cost_estimate is not None:
+        payload["cost_estimate"] = cost_estimate
 
     return payload
 

@@ -9,6 +9,7 @@ from pprint import pformat
 from typing import List, AsyncGenerator, Optional
 from snakemake_executor_plugin_aws_batch.batch_client import BatchClient
 from snakemake_executor_plugin_aws_batch.batch_job_builder import BatchJobBuilder
+from snakemake_executor_plugin_aws_batch import pricing
 from snakemake_executor_plugin_aws_batch import snakesee_remote
 from snakemake_executor_plugin_aws_batch import termination
 from snakemake_interface_executor_plugins.executors.base import SubmittedJobInfo
@@ -30,6 +31,31 @@ RUNNABLE_STUCK_SECONDS = 300
 # from running. CREATING/UPDATING are transient and must NOT fail the preflight
 # check (a queue mid-update is recoverable), so only these abort.
 FATAL_BATCH_STATUSES = frozenset({"INVALID", "DELETING", "DELETED"})
+
+
+def _ms_to_seconds(millis) -> Optional[float]:
+    """Convert an AWS millisecond epoch timestamp to seconds, or None."""
+    if millis is None:
+        return None
+    try:
+        return float(millis) / 1000.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _container_vcpus(container: dict) -> Optional[float]:
+    """Extract a Batch container's allocated vCPUs (resourceRequirements or legacy)."""
+    for requirement in container.get("resourceRequirements") or []:
+        if requirement.get("type") == "VCPU":
+            try:
+                return float(requirement.get("value"))
+            except (TypeError, ValueError):
+                return None
+    vcpus = container.get("vcpus")
+    try:
+        return float(vcpus) if vcpus is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 # Optional:
@@ -91,6 +117,20 @@ class ExecutorSettings(ExecutorSettingsBase):
                 "Warn if a job stays in a waiting state (SUBMITTED/PENDING/RUNNABLE) "
                 "this many seconds without starting, with a diagnosis of the job "
                 "queue / compute environment. Set to 0 to disable the warning."
+            ),
+            "env_var": False,
+            "required": False,
+        },
+    )
+    estimate_cost: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": (
+                "Estimate each job's cost from its instance type, run duration and "
+                "the AWS price list (on-demand) or spot price history (spot), and "
+                "surface it for monitoring. This is a list/market-price ESTIMATE, "
+                "not the billed amount. Requires pricing:GetProducts and "
+                "ec2:DescribeSpotPriceHistory; degrades silently without them."
             ),
             "env_var": False,
             "required": False,
@@ -553,12 +593,21 @@ class Executor(RemoteExecutor):
                         job_info
                     )
                 term = job.aux["_snakesee_termination"]
+            # Estimate cost once the job reaches a terminal phase (succeeded or
+            # failed — both consumed compute). Cached on the job to avoid repeat
+            # AWS calls if emission is retried.
+            cost = None
+            if phase in ("succeeded", "failed"):
+                if "_snakesee_cost" not in job.aux:
+                    job.aux["_snakesee_cost"] = self._estimate_cost(job_info)
+                cost = job.aux["_snakesee_cost"]
             payload = snakesee_remote.build_payload(
                 snakemake_jobid=snakemake_jobid,
                 external_jobid=job.external_jobid,
                 job_info=job_info,
                 region=region,
                 termination=term,
+                cost_estimate=cost,
             )
             if payload is not None:
                 snakesee_remote.emit(self.logger, payload)
@@ -589,6 +638,76 @@ class Executor(RemoteExecutor):
             self.logger.debug(f"termination classification skipped: {e}")
             return None
 
+    def _estimate_cost(self, job_info: dict) -> Optional[float]:
+        """Best-effort estimated USD cost for a finished job, or None.
+
+        Resolves the job's EC2 instance (type, vCPUs, spot/on-demand, AZ), prices
+        it (cached on-demand list price or spot market price), and apportions the
+        cost over the run window by the job's vCPU share. Opt-in via
+        ``estimate_cost``; never raises.
+        """
+        if not getattr(self.settings, "estimate_cost", False):
+            return None
+        try:
+            details = self._resolve_instance_details(job_info)
+            if not details or not details.get("instance_type"):
+                return None
+            price = pricing.price_per_hour(
+                details["instance_type"],
+                getattr(self.settings, "region", None) or "",
+                details.get("az"),
+                details.get("lifecycle"),
+                pricing_client=self._pricing_client(),
+                ec2_client=self._aws_client("ec2"),
+                cache=self._price_cache(),
+            )
+            container = job_info.get("container") or {}
+            return pricing.compute_cost(
+                price,
+                _ms_to_seconds(job_info.get("startedAt")),
+                _ms_to_seconds(job_info.get("stoppedAt")),
+                job_vcpus=_container_vcpus(container),
+                instance_vcpus=details.get("vcpus"),
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            self.logger.debug(f"cost estimation skipped: {e}")
+            return None
+
+    def _resolve_instance_details(self, job_info: dict) -> Optional[dict]:
+        """Resolve {instance_type, vcpus, lifecycle, az} for a job's EC2 instance."""
+        instance_id = termination._resolve_instance_id(
+            job_info, self._aws_client("ecs")
+        )
+        if not instance_id:
+            return None
+        try:
+            response = self._aws_client("ec2").describe_instances(
+                InstanceIds=[instance_id]
+            )
+            for reservation in response.get("Reservations", []):
+                for instance in reservation.get("Instances", []):
+                    cpu = instance.get("CpuOptions") or {}
+                    vcpus = None
+                    if cpu.get("CoreCount") and cpu.get("ThreadsPerCore"):
+                        vcpus = cpu["CoreCount"] * cpu["ThreadsPerCore"]
+                    else:
+                        # Without instance vCPUs the cost can't be apportioned and
+                        # defaults to the whole-instance price (an over-count when
+                        # the instance was shared) — log it so that's diagnosable.
+                        self.logger.debug(
+                            "instance vCPUs unresolved; cost estimate may over-count"
+                        )
+                    return {
+                        "instance_type": instance.get("InstanceType"),
+                        "vcpus": vcpus,
+                        # InstanceLifecycle is "spot"/"scheduled"; absent => on-demand.
+                        "lifecycle": instance.get("InstanceLifecycle"),
+                        "az": (instance.get("Placement") or {}).get("AvailabilityZone"),
+                    }
+        except Exception as e:  # pragma: no cover - defensive
+            self.logger.debug(f"could not resolve instance details: {e}")
+        return None
+
     def _aws_client(self, service: str):
         """Lazily create and cache a boto3 client for a service (e.g. ec2/ecs/iam/logs)."""
         cache = self.__dict__.setdefault("_aws_clients", {})
@@ -599,6 +718,23 @@ class Executor(RemoteExecutor):
                 service, region_name=getattr(self.settings, "region", None)
             )
         return cache[service]
+
+    def _pricing_client(self):
+        """Lazily create the AWS Price List client (only in us-east-1 / ap-south-1)."""
+        cache = self.__dict__.setdefault("_aws_clients", {})
+        if "pricing" not in cache:
+            import boto3
+
+            cache["pricing"] = boto3.client("pricing", region_name="us-east-1")
+        return cache["pricing"]
+
+    def _price_cache(self) -> pricing.PriceCache:
+        """Lazily create the persistent price cache."""
+        if not hasattr(self, "_price_cache_obj"):
+            self._price_cache_obj = pricing.PriceCache(
+                path=pricing.default_cache_path()
+            )
+        return self._price_cache_obj
 
     def _terminate_job(self, job: SubmittedJobInfo):
         """terminate job from submitted job info"""

@@ -176,6 +176,21 @@ and never affect the workflow:
 - Verifying the configured job role exists during the startup preflight check:
   `iam:GetRole`. Without it, role verification is skipped (a wrong role still
   fails clearly at job submission).
+- Estimating job cost (`--aws-batch-estimate-cost`): `pricing:GetProducts`
+  (on-demand list price) and `ec2:DescribeSpotPriceHistory` (spot). Without them,
+  no cost estimate is produced.
+
+## Cost estimation
+
+With `--aws-batch-estimate-cost`, the executor estimates each finished job's cost
+from its instance type, run duration and an AWS price (cached on-demand list
+price, or spot market price), apportioned by the job's vCPU share of the
+instance. This is a **list/market-price estimate, not the billed amount** (it
+excludes EBS, data transfer, Savings Plans/RIs, and — when the instance's vCPU
+count can't be resolved — over-counts a shared instance). On-demand prices are
+cached on disk under `$XDG_CACHE_HOME` with a 14-day TTL, so the steady state
+makes no pricing calls. The estimate is surfaced for monitoring (e.g. snakesee)
+and is off by default.
 
 ## Preflight validation
 
