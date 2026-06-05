@@ -4,7 +4,7 @@ All tests use synthetic describe_jobs entries — no AWS credentials required.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from snakemake_executor_plugin_aws_batch import snakesee_remote
 
@@ -105,6 +105,23 @@ class TestBuildPayload:
             snakesee_remote.build_payload(uuid_id, "abc", _job_info("RUNNING")) is None
         )
 
+    def test_termination_merged_when_provided(self):
+        info = _job_info("FAILED", stoppedAt=200000, container={"exitCode": 137})
+        term = {
+            "termination_category": "spot",
+            "termination_source": "aws_instance_state",
+            "termination_confidence": "high",
+        }
+        payload = snakesee_remote.build_payload(7, "abc", info, termination=term)
+        assert payload["termination_category"] == "spot"
+        assert payload["termination_source"] == "aws_instance_state"
+        assert payload["termination_confidence"] == "high"
+
+    def test_no_termination_keys_when_absent(self):
+        info = _job_info("FAILED", stoppedAt=200000)
+        payload = snakesee_remote.build_payload(7, "abc", info)
+        assert "termination_category" not in payload
+
     def test_optional_fields_omitted_when_absent(self):
         # A bare queued job with no timestamps/queue still produces a minimal payload.
         info = {"status": "SUBMITTED", "container": {}}
@@ -202,6 +219,84 @@ class TestEmitDedup:
             job, _job_info("RUNNING", startedAt=142000)
         )  # must not raise
         ex.logger.info.assert_not_called()
+
+    def test_failed_phase_classifies_and_includes_termination(self):
+        # On a FAILED phase, _emit_snakesee_state classifies termination and the
+        # emitted payload carries the classification. Inject EC2/ECS mocks so the
+        # high-confidence instance-state tier fires.
+        ex = self._executor_with_logger()
+        ex._aws_clients = {
+            "ecs": MagicMock(
+                describe_container_instances=MagicMock(
+                    return_value={"containerInstances": [{"ec2InstanceId": "i-abc"}]}
+                )
+            ),
+            "ec2": MagicMock(
+                describe_instances=MagicMock(
+                    return_value={
+                        "Reservations": [
+                            {
+                                "Instances": [
+                                    {
+                                        "StateReason": {
+                                            "Code": "Server.SpotInstanceTermination"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                )
+            ),
+        }
+        job = self._submitted_job()
+        info = _job_info(
+            "FAILED",
+            stoppedAt=200000,
+            container={
+                "exitCode": 137,
+                "containerInstanceArn": "arn:aws:ecs:us-east-1:1:container-instance/c/abc",
+            },
+        )
+        ex._emit_snakesee_state(job, info)
+        ex.logger.info.assert_called_once()
+        _, kwargs = ex.logger.info.call_args
+        payload = kwargs["extra"][snakesee_remote.WIRE_KEY]
+        assert payload["termination_category"] == "spot"
+        assert payload["termination_confidence"] == "high"
+
+    def test_running_phase_does_not_classify(self):
+        # Classification only runs on the failed phase; a running emit has no
+        # termination keys and never touches the AWS clients.
+        ex = self._executor_with_logger()
+        ex._classify_termination = MagicMock()  # would raise if called incorrectly
+        job = self._submitted_job()
+        ex._emit_snakesee_state(job, _job_info("RUNNING", startedAt=142000))
+        ex._classify_termination.assert_not_called()
+
+    def test_classification_cached_across_retries(self):
+        # If emission is retried for the same failed job, classification (and its
+        # AWS calls) runs at most once — the result is cached on job.aux.
+        ex = self._executor_with_logger()
+        ex._classify_termination = MagicMock(
+            return_value={"termination_category": "spot"}
+        )
+        job = self._submitted_job()
+        info = _job_info("FAILED", stoppedAt=200000)
+        ex._emit_snakesee_state(job, info)
+        # Force a retry by clearing the phase dedup marker (simulating a prior
+        # emit failure) while leaving the cached classification in place.
+        job.aux.pop("_snakesee_phase", None)
+        ex._emit_snakesee_state(job, info)
+        assert ex._classify_termination.call_count == 1
+
+    def test_aws_client_lazily_created_and_cached(self):
+        ex = self._executor_with_logger()
+        with patch("boto3.client", return_value=MagicMock()) as mk:
+            a = ex._aws_client("ec2")
+            b = ex._aws_client("ec2")
+        assert a is b
+        mk.assert_called_once_with("ec2", region_name="us-east-1")
 
     def test_get_job_status_emits_terminal_before_returning(self):
         # Drive the real _get_job_status control flow: a terminal poll must emit a

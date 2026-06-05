@@ -9,6 +9,7 @@ from typing import List, AsyncGenerator, Optional
 from snakemake_executor_plugin_aws_batch.batch_client import BatchClient
 from snakemake_executor_plugin_aws_batch.batch_job_builder import BatchJobBuilder
 from snakemake_executor_plugin_aws_batch import snakesee_remote
+from snakemake_executor_plugin_aws_batch import termination
 from snakemake_interface_executor_plugins.executors.base import SubmittedJobInfo
 from snakemake_interface_executor_plugins.executors.remote import RemoteExecutor
 from snakemake_interface_executor_plugins.settings import (
@@ -260,11 +261,22 @@ class Executor(RemoteExecutor):
                 return
             snakemake_jobid = getattr(getattr(job, "job", None), "jobid", None)
             region = getattr(self.settings, "region", None)
+            # Classify why the job died (only on the terminal failed phase). Cache
+            # the result on the job so that if emission is retried on a later poll
+            # (e.g. a transient logging failure) we don't re-issue the AWS calls.
+            term = None
+            if phase == "failed":
+                if "_snakesee_termination" not in job.aux:
+                    job.aux["_snakesee_termination"] = self._classify_termination(
+                        job_info
+                    )
+                term = job.aux["_snakesee_termination"]
             payload = snakesee_remote.build_payload(
                 snakemake_jobid=snakemake_jobid,
                 external_jobid=job.external_jobid,
                 job_info=job_info,
                 region=region,
+                termination=term,
             )
             if payload is not None:
                 snakesee_remote.emit(self.logger, payload)
@@ -273,6 +285,38 @@ class Executor(RemoteExecutor):
             Exception
         ) as e:  # pragma: no cover - defensive; monitoring must not break
             self.logger.debug(f"snakesee remote-state emit skipped: {e}")
+
+    def _classify_termination(self, job_info: dict) -> Optional[dict]:
+        """Best-effort classification of a failed job's termination cause.
+
+        Uses EC2/ECS lookups for a high-confidence Spot-interruption signal,
+        falling back to status-reason string heuristics. Never raises.
+
+        Note: the high-confidence tier calls ``ecs:DescribeContainerInstances``
+        and ``ec2:DescribeInstances`` with the executor's own credentials. If
+        those permissions are absent the calls are swallowed and classification
+        degrades to the low-confidence string tier.
+        """
+        try:
+            return termination.classify_termination(
+                job_info,
+                ec2_client=self._aws_client("ec2"),
+                ecs_client=self._aws_client("ecs"),
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            self.logger.debug(f"termination classification skipped: {e}")
+            return None
+
+    def _aws_client(self, service: str):
+        """Lazily create and cache a boto3 client for a service (ec2/ecs)."""
+        cache = self.__dict__.setdefault("_aws_clients", {})
+        if service not in cache:
+            import boto3
+
+            cache[service] = boto3.client(
+                service, region_name=getattr(self.settings, "region", None)
+            )
+        return cache[service]
 
     def _terminate_job(self, job: SubmittedJobInfo):
         """terminate job from submitted job info"""

@@ -151,3 +151,26 @@ This s
 
 
 
+
+# Monitoring with snakesee
+
+The executor publishes structured remote-job-state events (queued/running/
+terminal, the external job id, queue, true execution-window timestamps, and a
+termination classification) that the [snakesee](https://github.com/) monitoring
+TUI consumes via its Snakemake 9+ logger plugin. The events are attached to
+ordinary log records; running without snakesee is unaffected.
+
+## Optional IAM permissions for high-confidence Spot detection
+
+When a job fails, the executor classifies *why* (e.g. a Spot interruption). For
+a **high-confidence** Spot signal it resolves the job's EC2 instance and reads
+its termination reason, which requires two read-only permissions on the
+**executor's own credentials** (the principal running Snakemake), in addition to
+the Batch permissions the executor already needs:
+
+- `ecs:DescribeContainerInstances`
+- `ec2:DescribeInstances`
+
+These are optional. Without them, the lookups are skipped silently and Spot
+detection falls back to a lower-confidence heuristic over the job's status
+reason — the workflow itself is never affected.

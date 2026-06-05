@@ -56,6 +56,7 @@ def build_payload(
     external_jobid: Optional[str],
     job_info: dict,
     region: Optional[str] = None,
+    termination: Optional[dict] = None,
 ) -> Optional[dict]:
     """Build the snakesee remote-state payload from a describe_jobs entry.
 
@@ -64,6 +65,8 @@ def build_payload(
         external_jobid: The AWS Batch job id/ARN.
         job_info: A single entry from ``describe_jobs()["jobs"]``.
         region: AWS region, used by snakesee to build console deep links.
+        termination: Optional ``{termination_category, termination_source,
+            termination_confidence}`` classification for a failed job.
 
     Returns:
         The payload dict, or None if the Batch status can't be mapped to a phase,
@@ -125,6 +128,17 @@ def build_payload(
     status_reason = job_info.get("statusReason")
     if status_reason is not None:
         payload["status_reason"] = status_reason
+
+    # Merge the termination classification (only its known keys, only when set).
+    if termination:
+        for key in (
+            "termination_category",
+            "termination_source",
+            "termination_confidence",
+        ):
+            value = termination.get(key)
+            if value is not None:
+                payload[key] = value
 
     return payload
 
