@@ -8,6 +8,7 @@ from pprint import pformat
 from typing import List, AsyncGenerator, Optional
 from snakemake_executor_plugin_aws_batch.batch_client import BatchClient
 from snakemake_executor_plugin_aws_batch.batch_job_builder import BatchJobBuilder
+from snakemake_executor_plugin_aws_batch import snakesee_remote
 from snakemake_interface_executor_plugins.executors.base import SubmittedJobInfo
 from snakemake_interface_executor_plugins.executors.remote import RemoteExecutor
 from snakemake_interface_executor_plugins.settings import (
@@ -221,6 +222,11 @@ class Executor(RemoteExecutor):
             job.aux["job_definition_arn"] = job_info.get("jobDefinition", None)
             exit_code = job_info.get("container", {}).get("exitCode", None)
 
+            # Surface the rich Batch state (queue/run/terminal, timestamps, ids) to
+            # snakesee via the logger plugin. Emit once per phase transition so the
+            # event stream isn't spammed on every poll.
+            self._emit_snakesee_state(job, job_info)
+
             if job_status == "SUCCEEDED":
                 return 0, None
             elif job_status == "FAILED":
@@ -237,6 +243,36 @@ class Executor(RemoteExecutor):
         except Exception as e:
             self.logger.error(f"Error getting job status: {e}")
             return None, str(e)
+
+    def _emit_snakesee_state(self, job: SubmittedJobInfo, job_info: dict) -> None:
+        """Emit a snakesee remote-state event when the job's phase changes.
+
+        De-duplicated per job: the normalized phase last emitted is stashed in
+        ``job.aux`` so each queue->run->terminal transition is reported once even
+        though ``check_active_jobs`` polls repeatedly. Best-effort: any failure
+        here must never disrupt job monitoring.
+        """
+        try:
+            if job.aux is None:
+                return
+            phase = snakesee_remote.phase_for_status(job_info.get("status"))
+            if phase is None or job.aux.get("_snakesee_phase") == phase:
+                return
+            snakemake_jobid = getattr(getattr(job, "job", None), "jobid", None)
+            region = getattr(self.settings, "region", None)
+            payload = snakesee_remote.build_payload(
+                snakemake_jobid=snakemake_jobid,
+                external_jobid=job.external_jobid,
+                job_info=job_info,
+                region=region,
+            )
+            if payload is not None:
+                snakesee_remote.emit(self.logger, payload)
+                job.aux["_snakesee_phase"] = phase
+        except (
+            Exception
+        ) as e:  # pragma: no cover - defensive; monitoring must not break
+            self.logger.debug(f"snakesee remote-state emit skipped: {e}")
 
     def _terminate_job(self, job: SubmittedJobInfo):
         """terminate job from submitted job info"""
