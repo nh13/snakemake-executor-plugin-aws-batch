@@ -3,6 +3,7 @@ __copyright__ = "Copyright 2025, Snakemake community"
 __email__ = "jake.vancampen7@gmail.com"
 __license__ = "MIT"
 
+import time
 from dataclasses import dataclass, field
 from pprint import pformat
 from typing import List, AsyncGenerator, Optional
@@ -20,6 +21,10 @@ from snakemake_interface_executor_plugins.jobs import (
     JobExecutorInterface,
 )
 from snakemake_interface_common.exceptions import WorkflowError
+
+# How long a job may sit in a waiting state (SUBMITTED/PENDING/RUNNABLE) before we
+# diagnose the queue/compute environment and warn that it may be stuck.
+RUNNABLE_STUCK_SECONDS = 300
 
 
 # Optional:
@@ -72,6 +77,18 @@ class ExecutorSettings(ExecutorSettingsBase):
                 "Task timeout (seconds) will force AWS Batch to terminate "
                 "a Batch task if it fails to finish within the timeout, minimum 60"
             )
+        },
+    )
+    runnable_stuck_seconds: Optional[int] = field(
+        default=RUNNABLE_STUCK_SECONDS,
+        metadata={
+            "help": (
+                "Warn if a job stays in a waiting state (SUBMITTED/PENDING/RUNNABLE) "
+                "this many seconds without starting, with a diagnosis of the job "
+                "queue / compute environment. Set to 0 to disable the warning."
+            ),
+            "env_var": False,
+            "required": False,
         },
     )
 
@@ -188,10 +205,25 @@ class Executor(RemoteExecutor):
         # To modify the time until the next call of this method,
         # you can set self.next_sleep_seconds here.
         self.logger.debug(f"Monitoring {len(active_jobs)} active Batch jobs")
-        for job in active_jobs:
-            async with self.status_rate_limiter:
-                status_code, msg = self._get_job_status(job)
 
+        # Fetch the status of every active job in as few API calls as possible:
+        # describe_jobs accepts up to 100 ids per call, so this is one call per 100
+        # jobs instead of one per job, which matters (and avoids throttling) on
+        # large workflows.
+        async with self.status_rate_limiter:
+            info_by_id = self._describe_jobs_bulk(
+                [job.external_jobid for job in active_jobs]
+            )
+
+        for job in active_jobs:
+            job_info = info_by_id.get(job.external_jobid)
+            if job_info is None:
+                # No status this round (job not yet visible, or a describe error);
+                # keep monitoring it.
+                yield job
+                continue
+
+            status_code, msg = self._interpret_job_status(job, job_info)
             if status_code is not None:
                 if status_code == 0:
                     self.report_job_success(job)
@@ -202,23 +234,45 @@ class Executor(RemoteExecutor):
             else:
                 yield job
 
-    def _get_job_status(self, job: SubmittedJobInfo) -> tuple[int, Optional[str]]:
-        """
-        Poll for Batch job status and return exit code and message if job is complete.
+    def _describe_jobs_bulk(self, external_jobids: List[str]) -> dict:
+        """Describe many Batch jobs, mapping external_jobid -> job_info.
 
-        Returns:
-            tuple: (exit_code, failure_message)
+        Chunks the ids into batches of 100 (the describe_jobs limit). A failed
+        chunk is logged and skipped; its jobs are simply absent from the map and
+        get monitored again next poll.
+        """
+        info_by_id: dict = {}
+        for start in range(0, len(external_jobids), 100):
+            chunk = external_jobids[start : start + 100]
+            try:
+                response = self.batch_client.describe_jobs(jobs=chunk)
+                for job_info in response.get("jobs", []):
+                    jid = job_info.get("jobId")
+                    if jid is not None:
+                        info_by_id[jid] = job_info
+            except Exception as e:
+                self.logger.error(f"Error describing Batch jobs: {e}")
+        # describe_jobs silently omits unknown ids (it doesn't error on them); a
+        # persistently missing id (e.g. a job aged out of Batch's describe
+        # retention) would otherwise be re-yielded forever with no signal.
+        missing = [jid for jid in external_jobids if jid not in info_by_id]
+        if missing:
+            self.logger.debug(
+                f"No Batch status returned for {len(missing)} job(s): {missing}"
+            )
+        return info_by_id
+
+    def _interpret_job_status(
+        self, job: SubmittedJobInfo, job_info: dict
+    ) -> tuple[Optional[int], Optional[str]]:
+        """Interpret a describe_jobs entry into (exit_code, message).
+
+        Returns (None, None) while the job is still active. Also emits the
+        snakesee remote-state event, warns about stuck jobs, and (on failure)
+        appends a CloudWatch log tail to the message. Never raises.
         """
         try:
-            response = self.batch_client.describe_jobs(jobs=[job.external_jobid])
-            jobs = response.get("jobs", [])
-
-            if not jobs:
-                return None, f"No job found with ID {job.external_jobid}"
-
-            job_info: dict = jobs[0]
             job_status = job_info.get("status", "UNKNOWN")
-
             # push the job_definition_arn to the aux dict for use in cleanup
             job.aux["job_definition_arn"] = job_info.get("jobDefinition", None)
             exit_code = job_info.get("container", {}).get("exitCode", None)
@@ -228,22 +282,152 @@ class Executor(RemoteExecutor):
             # event stream isn't spammed on every poll.
             self._emit_snakesee_state(job, job_info)
 
+            # Warn if the job has been waiting (not running) for too long.
+            self._maybe_warn_stuck(job, job_status)
+
             if job_status == "SUCCEEDED":
                 return 0, None
             elif job_status == "FAILED":
                 reason = job_info.get("statusReason", "Unknown reason")
+                log_tail = self._failure_log_tail(job_info)
+                if log_tail:
+                    reason = f"{reason}\n--- last CloudWatch log lines ---\n{log_tail}"
                 return exit_code or 1, reason
             else:
-                log_info = {
-                    "job_name": job_info.get("jobName", "unknown"),
-                    "job_id": job.external_jobid,
-                    "status": job_status,
-                }
-                self.logger.debug(log_info)
+                self.logger.debug(
+                    {
+                        "job_name": job_info.get("jobName", "unknown"),
+                        "job_id": job.external_jobid,
+                        "status": job_status,
+                    }
+                )
                 return None, None
+        except Exception as e:  # pragma: no cover - defensive
+            self.logger.error(f"Error interpreting job status: {e}")
+            return None, None
+
+    def _get_job_status(
+        self, job: SubmittedJobInfo
+    ) -> tuple[Optional[int], Optional[str]]:
+        """Poll a single Batch job's status (describe + interpret).
+
+        Retained for direct/single-job use; the polling loop uses the bulk path.
+
+        Returns:
+            tuple: (exit_code, failure_message)
+        """
+        try:
+            response = self.batch_client.describe_jobs(jobs=[job.external_jobid])
+            jobs = response.get("jobs", [])
+            if not jobs:
+                return None, f"No job found with ID {job.external_jobid}"
+            return self._interpret_job_status(job, jobs[0])
         except Exception as e:
             self.logger.error(f"Error getting job status: {e}")
             return None, str(e)
+
+    def _failure_log_tail(self, job_info: dict, max_lines: int = 20) -> Optional[str]:
+        """Return the tail of a failed job's CloudWatch log stream, or None.
+
+        Best-effort: the actual stderr lives in CloudWatch (default log group
+        ``/aws/batch/job``), so surfacing the last lines turns a terse
+        ``statusReason`` into an actionable error. Requires ``logs:GetLogEvents``;
+        any failure (missing permission, no stream) degrades to None.
+        """
+        container = job_info.get("container") or {}
+        log_stream = container.get("logStreamName")
+        if not log_stream:
+            return None
+        # Use the job's configured awslogs group if present, else the Batch default.
+        log_options = (container.get("logConfiguration") or {}).get("options") or {}
+        log_group = log_options.get("awslogs-group", "/aws/batch/job")
+        try:
+            logs_client = self._aws_client("logs")
+            response = logs_client.get_log_events(
+                logGroupName=log_group,
+                logStreamName=log_stream,
+                limit=max_lines,
+                startFromHead=False,
+            )
+            messages = [e.get("message", "") for e in response.get("events", [])]
+            return "\n".join(m for m in messages if m) or None
+        except Exception as e:
+            self.logger.debug(f"could not fetch CloudWatch log tail: {e}")
+            return None
+
+    def _maybe_warn_stuck(self, job: SubmittedJobInfo, job_status: str) -> None:
+        """Warn once if a job has waited (not running) beyond the stuck threshold.
+
+        A job stuck in SUBMITTED/PENDING/RUNNABLE usually means the compute
+        environment is disabled, at ``maxvCpus``, or has no matching instances —
+        a common silent failure mode. After the configured threshold
+        (``runnable_stuck_seconds``, default ``RUNNABLE_STUCK_SECONDS``; set to 0
+        to disable) we diagnose the queue/compute environment and log a single
+        actionable warning.
+        """
+        if job.aux is None:
+            return
+        threshold = getattr(self.settings, "runnable_stuck_seconds", None)
+        if threshold is None:
+            threshold = RUNNABLE_STUCK_SECONDS
+        if threshold <= 0:
+            return  # warning disabled
+        waiting_states = ("SUBMITTED", "PENDING", "RUNNABLE")
+        if job_status not in waiting_states:
+            job.aux.pop("_stuck_since", None)
+            return
+        if job.aux.get("_stuck_warned"):
+            return
+        now = time.time()
+        since = job.aux.setdefault("_stuck_since", now)
+        if now - since < threshold:
+            return
+        self.logger.warning(
+            f"AWS Batch job {job.external_jobid} has been {job_status} for "
+            f"{int(now - since)}s without starting. {self._diagnose_queue_capacity()}"
+        )
+        job.aux["_stuck_warned"] = True
+
+    def _diagnose_queue_capacity(self) -> str:
+        """Diagnose why jobs may not be starting, from the queue/compute env state."""
+        try:
+            queue_arn = getattr(self.settings, "job_queue", None)
+            if not queue_arn:
+                return "(no job queue configured)"
+            queues = self.batch_client.describe_job_queues(jobQueues=[queue_arn]).get(
+                "jobQueues", []
+            )
+            if not queues:
+                return "Job queue not found."
+            jq = queues[0]
+            if jq.get("state") != "ENABLED":
+                return f"Likely cause: job queue is {jq.get('state')} (not ENABLED)."
+            ce_arns = [
+                o.get("computeEnvironment")
+                for o in jq.get("computeEnvironmentOrder", [])
+            ]
+            ces = self.batch_client.describe_compute_environments(
+                computeEnvironments=[c for c in ce_arns if c]
+            ).get("computeEnvironments", [])
+            problems = []
+            for ce in ces:
+                name = ce.get("computeEnvironmentName", "?")
+                if ce.get("state") != "ENABLED":
+                    problems.append(f"compute environment {name} is {ce.get('state')}")
+                if ce.get("status") not in (None, "VALID"):
+                    problems.append(
+                        f"compute environment {name} status is {ce.get('status')}"
+                    )
+                if (ce.get("computeResources") or {}).get("maxvCpus") == 0:
+                    problems.append(f"compute environment {name} has maxvCpus=0")
+            if problems:
+                return "Likely cause: " + "; ".join(problems) + "."
+            return (
+                "Compute environment looks healthy; capacity may be saturated or no "
+                "matching instance type is currently available."
+            )
+        except Exception as e:
+            return f"(could not diagnose queue capacity: {e})"
 
     def _emit_snakesee_state(self, job: SubmittedJobInfo, job_info: dict) -> None:
         """Emit a snakesee remote-state event when the job's phase changes.

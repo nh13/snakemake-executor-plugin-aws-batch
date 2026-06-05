@@ -10,8 +10,10 @@ class TestWorkflowsMocked(TestWorkflowsBase):
         return_value={"jobName": "job_id", "jobId": "job_id", "jobQueue": "job_queue"},
     )
     @patch(
-        "snakemake_executor_plugin_aws_batch.Executor._get_job_status",
-        return_value=(0, "SUCCEEDED"),
+        "snakemake_executor_plugin_aws_batch.Executor._describe_jobs_bulk",
+        return_value={
+            "job_id": {"jobId": "job_id", "status": "SUCCEEDED", "container": {}}
+        },
     )
     @patch(
         "snakemake.dag.DAG.check_and_touch_output",

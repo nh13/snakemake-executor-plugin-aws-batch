@@ -160,17 +160,25 @@ termination classification) that the [snakesee](https://github.com/) monitoring
 TUI consumes via its Snakemake 9+ logger plugin. The events are attached to
 ordinary log records; running without snakesee is unaffected.
 
-## Optional IAM permissions for high-confidence Spot detection
+## Optional IAM permissions for richer diagnostics
 
-When a job fails, the executor classifies *why* (e.g. a Spot interruption). For
-a **high-confidence** Spot signal it resolves the job's EC2 instance and reads
-its termination reason, which requires two read-only permissions on the
-**executor's own credentials** (the principal running Snakemake), in addition to
-the Batch permissions the executor already needs:
+A few features call additional read-only AWS APIs with the **executor's own
+credentials** (the principal running Snakemake), beyond the Batch permissions the
+executor already needs. All are optional — missing permissions degrade silently
+and never affect the workflow:
 
-- `ecs:DescribeContainerInstances`
-- `ec2:DescribeInstances`
+- High-confidence Spot-interruption classification resolves a failed job's EC2
+  instance and reads its termination reason:
+  `ecs:DescribeContainerInstances`, `ec2:DescribeInstances`. Without them, Spot
+  detection falls back to a lower-confidence status-reason heuristic.
+- Surfacing the tail of a failed job's logs in the error message:
+  `logs:GetLogEvents`. Without it, only the Batch `statusReason` is shown.
 
-These are optional. Without them, the lookups are skipped silently and Spot
-detection falls back to a lower-confidence heuristic over the job's status
-reason — the workflow itself is never affected.
+## Stuck-job diagnosis
+
+If a job stays in a waiting state (SUBMITTED/PENDING/RUNNABLE) without starting,
+the executor diagnoses the job queue and compute environment (disabled queue,
+disabled/invalid compute environment, `maxvCpus=0`, or saturated capacity) and
+logs a single actionable warning. The threshold is configurable with
+`--aws-batch-runnable-stuck-seconds` (default 300; set to 0 to disable). This
+uses the Batch permissions the executor already has.
