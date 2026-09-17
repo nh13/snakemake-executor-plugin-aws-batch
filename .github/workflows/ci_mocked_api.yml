@@ -92,11 +92,25 @@ jobs:
         run: poetry install
       
       - name: Setup minio
-        uses: comfuture/minio-action@v1
-        with:
-          access_key: minio
-          secret_key: minio123
-          port: 9000
+        run: |
+          docker run -d -p 9000:9000 --name minio \
+            -e "MINIO_ROOT_USER=minio" \
+            -e "MINIO_ROOT_PASSWORD=minio123" \
+            quay.io/minio/minio server /data
+          # Wait until MinIO actually serves S3 requests before running the
+          # tests. /minio/health/live can return 200 while the object layer is
+          # still initializing, so probe an authenticated S3 operation (the same
+          # endpoint and credentials the mocked tests use) instead.
+          for _ in $(seq 1 30); do
+            if poetry run python -c 'import boto3; boto3.client("s3", endpoint_url="http://127.0.0.1:9000", aws_access_key_id="minio", aws_secret_access_key="minio123", region_name="us-east-1").list_buckets()'; then
+              echo "MinIO is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MinIO did not become ready" >&2
+          docker logs minio
+          exit 1
 
       - name: Run pytest
         env:
