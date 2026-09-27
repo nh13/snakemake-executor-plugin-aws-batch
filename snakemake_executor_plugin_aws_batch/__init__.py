@@ -120,28 +120,14 @@ class ExecutorSettings(ExecutorSettingsBase):
                 "set, every job's image (--container-image, or a rule's "
                 "aws_batch_container_image resource) is looked up in it, as written "
                 "or normalized (ubuntu = docker.io/library/ubuntu:latest), and a job "
-                "whose image is not in the map fails."
+                "whose image is not in the map fails without being submitted. "
+                "Cannot be combined with --aws-batch-job-definition or the per-rule "
+                "aws_batch_job_definition resource."
             ),
             "env_var": True,
             "required": False,
         },
     )
-
-
-def resolve_container_image(
-    image_map: Optional[ImageMap], job_name: str, image: str
-) -> str:
-    """The image to run a job with: ``image``, or its entry in ``image_map`` when
-    there is one. Raises ``WorkflowError`` for an image the map does not have."""
-    if image_map is None:
-        return image
-    mapped = image_map.resolve(image)
-    if mapped is None:
-        raise WorkflowError(
-            f"{job_name}: container image {image!r} is not in the container image map; "
-            "add it to the map (or declare it where the map is made)"
-        )
-    return mapped
 
 
 # Required:
@@ -192,8 +178,15 @@ class Executor(RemoteExecutor):
         self.settings = self.workflow.executor_settings
         self.logger.debug(f"ExecutorSettings: {pformat(self.settings, indent=2)}")
 
-        map_path = getattr(self.settings, "container_image_map", None)
+        map_path = self.settings.container_image_map
         if map_path:
+            if self.settings.job_definition:
+                raise WorkflowError(
+                    "Cannot combine the container image map "
+                    "(--aws-batch-container-image-map) with a pre-existing job "
+                    "definition (--aws-batch-job-definition): jobs would run the "
+                    "definition's image, which the map cannot check"
+                )
             try:
                 self.image_map = ImageMap.from_file(map_path)
             except (OSError, ValueError) as e:
@@ -221,13 +214,13 @@ class Executor(RemoteExecutor):
         # If required, make sure to pass the job's id to the job_info object, as keyword
         # argument 'external_job_id'.
 
-        # Use rule-level container image if specified via resources,
-        # otherwise fall back to global container image; then the image map, if any.
-        container_image = resolve_container_image(
-            self.image_map,
-            job.name,
-            job.resources.get("aws_batch_container_image", self.container_image),
-        )
+        try:
+            container_image = self._container_image(job)
+        except WorkflowError as e:
+            # Fail this job like any other failed job: jobs already running finish,
+            # and --keep-going and restarts apply.
+            self.report_job_error(SubmittedJobInfo(job=job), msg=str(e))
+            return
         try:
             job_definition = BatchJobBuilder(
                 logger=self.logger,
@@ -253,6 +246,23 @@ class Executor(RemoteExecutor):
                 job=job, external_jobid=job_info["jobId"], aux=dict(job_info)
             )
         )
+
+    def _container_image(self, job: JobExecutorInterface) -> str:
+        """The image to run ``job`` with: the rule's ``aws_batch_container_image``
+        resource, else the global container image, then its entry in the image map
+        when there is one. Raises ``WorkflowError`` when the map refuses the job."""
+        image = job.resources.get("aws_batch_container_image", self.container_image)
+        if self.image_map is None:
+            return image
+        job_definition = job.resources.get("aws_batch_job_definition")
+        if job_definition:
+            raise WorkflowError(
+                f"{job.name}: cannot run on the pre-existing job definition "
+                f"{job_definition!r} (aws_batch_job_definition) with a container "
+                "image map: the job would run the definition's image, which the map "
+                "cannot check"
+            )
+        return self.image_map.require(image, job.name)
 
     async def check_active_jobs(
         self, active_jobs: List[SubmittedJobInfo]
