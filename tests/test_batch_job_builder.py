@@ -1043,7 +1043,7 @@ class TestSubmitSchedulingPriority:
 
 
 def _run_job_capture_container_image(
-    resources: dict, global_image: str = "global-image:latest"
+    resources: dict, global_image: str = "global-image:latest", image_map=None
 ) -> str:
     """Call Executor.run_job with the given job.resources (BatchJobBuilder mocked)
     and return the container_image it passed to BatchJobBuilder."""
@@ -1056,6 +1056,7 @@ def _run_job_capture_container_image(
         job_queue="test-queue", job_role="test-role", tags=None, task_timeout=None
     )
     executor.container_image = global_image
+    executor.image_map = image_map
     executor.envvars = MagicMock(return_value={})
     executor.format_job_exec = MagicMock(return_value="snakemake ...")
     executor.report_job_submission = MagicMock()
@@ -1089,6 +1090,33 @@ class TestRunJobContainerImage:
         """With no per-rule resource, run_job must use the global container image."""
         image = _run_job_capture_container_image({})
         assert image == "global-image:latest"
+
+    def test_the_image_map_replaces_rule_and_global_images(self):
+        """With an image map, the rule's and the global image run their mapped one."""
+        from snakemake_executor_plugin_aws_batch.image_map import ImageMap
+
+        image_map = ImageMap(
+            {
+                "rule-image:v2": "registry.example/rule@sha256:1",
+                "global-image:latest": "g",
+            }
+        )
+        rule = {"aws_batch_container_image": "rule-image:v2"}
+        assert (
+            _run_job_capture_container_image(rule, image_map=image_map)
+            == "registry.example/rule@sha256:1"
+        )
+        assert _run_job_capture_container_image({}, image_map=image_map) == "g"
+
+    def test_an_image_missing_from_the_map_fails_the_job(self):
+        """A job whose image is not in the map is refused before it is submitted."""
+        from snakemake_executor_plugin_aws_batch.image_map import ImageMap
+
+        with pytest.raises(WorkflowError, match="not in the container image map"):
+            _run_job_capture_container_image(
+                {"aws_batch_container_image": "other:1"},
+                image_map=ImageMap({"global-image:latest": "g"}),
+            )
 
 
 # ---------------------------------------------------------------------------

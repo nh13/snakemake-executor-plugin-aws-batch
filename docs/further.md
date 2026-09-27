@@ -52,6 +52,30 @@ below): the worker runs `snakemake` inside the container, so the image must have
 Snakemake and a compatible storage plugin installed. A plain tool image that does
 not include Snakemake will fail to launch the job.
 
+## Container Image Map
+
+A deployment that copies every image a workflow uses into its own registry (for example,
+pinned by digest in a private ECR repository) can make jobs run those copies without
+editing the workflow. Pass a JSON object mapping image references to the images to run:
+
+```json
+{
+  "quay.io/biocontainers/samtools:1.21--h50ea8bc_0": "123456789012.dkr.ecr.us-east-1.amazonaws.com/tools@sha256:…",
+  "my-custom-image:tag": "123456789012.dkr.ecr.us-east-1.amazonaws.com/custom@sha256:…"
+}
+```
+
+```console
+snakemake --executor aws-batch --aws-batch-container-image-map images.json ...
+# or: SNAKEMAKE_AWS_BATCH_CONTAINER_IMAGE_MAP=images.json
+```
+
+Every job's image, the global `--container-image` or a rule's `aws_batch_container_image`
+(including one computed by a function), is looked up in the map as written and then in
+its normalized form (`ubuntu` is `docker.io/library/ubuntu:latest`). The map is strict:
+a job whose image is not in it fails before it is submitted, so no job pulls an image
+the deployment has not copied. To let an image through unchanged, map it to itself.
+
 # Example
 
 ## Create environment

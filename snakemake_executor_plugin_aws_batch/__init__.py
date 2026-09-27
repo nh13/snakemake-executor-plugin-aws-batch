@@ -9,6 +9,7 @@ from typing import List, AsyncGenerator, Optional
 from snakemake_executor_plugin_aws_batch.batch_client import BatchClient
 from snakemake_executor_plugin_aws_batch.batch_job_builder import BatchJobBuilder
 from snakemake_executor_plugin_aws_batch import remote_state
+from snakemake_executor_plugin_aws_batch.image_map import ImageMap
 from snakemake_interface_executor_plugins.executors.base import SubmittedJobInfo
 from snakemake_interface_executor_plugins.executors.remote import RemoteExecutor
 from snakemake_interface_executor_plugins.settings import (
@@ -110,6 +111,37 @@ class ExecutorSettings(ExecutorSettingsBase):
             "required": False,
         },
     )
+    container_image_map: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Path to a JSON object mapping container image references to the "
+                "images to run instead (e.g. a pinned private-registry copy). When "
+                "set, every job's image (--container-image, or a rule's "
+                "aws_batch_container_image resource) is looked up in it, as written "
+                "or normalized (ubuntu = docker.io/library/ubuntu:latest), and a job "
+                "whose image is not in the map fails."
+            ),
+            "env_var": True,
+            "required": False,
+        },
+    )
+
+
+def resolve_container_image(
+    image_map: Optional[ImageMap], job_name: str, image: str
+) -> str:
+    """The image to run a job with: ``image``, or its entry in ``image_map`` when
+    there is one. Raises ``WorkflowError`` for an image the map does not have."""
+    if image_map is None:
+        return image
+    mapped = image_map.resolve(image)
+    if mapped is None:
+        raise WorkflowError(
+            f"{job_name}: container image {image!r} is not in the container image map; "
+            "add it to the map (or declare it where the map is made)"
+        )
+    return mapped
 
 
 # Required:
@@ -148,6 +180,9 @@ common_settings = CommonSettings(
 # Required:
 # Implementation of your executor
 class Executor(RemoteExecutor):
+    # Set from the container_image_map setting in __post_init__; None = no map.
+    image_map: Optional[ImageMap] = None
+
     def __post_init__(self):
         # snakemake/snakemake:latest container image
         self.container_image = self.workflow.remote_execution_settings.container_image
@@ -156,6 +191,19 @@ class Executor(RemoteExecutor):
 
         self.settings = self.workflow.executor_settings
         self.logger.debug(f"ExecutorSettings: {pformat(self.settings, indent=2)}")
+
+        map_path = getattr(self.settings, "container_image_map", None)
+        if map_path:
+            try:
+                self.image_map = ImageMap.from_file(map_path)
+            except (OSError, ValueError) as e:
+                raise WorkflowError(
+                    f"Failed to read the container image map {map_path}: {e}"
+                ) from e
+            self.logger.info(
+                f"Container images are resolved through {map_path} "
+                f"({len(self.image_map)} entries)"
+            )
 
         try:
             self.batch_client = BatchClient(region_name=self.settings.region)
@@ -173,13 +221,14 @@ class Executor(RemoteExecutor):
         # If required, make sure to pass the job's id to the job_info object, as keyword
         # argument 'external_job_id'.
 
+        # Use rule-level container image if specified via resources,
+        # otherwise fall back to global container image; then the image map, if any.
+        container_image = resolve_container_image(
+            self.image_map,
+            job.name,
+            job.resources.get("aws_batch_container_image", self.container_image),
+        )
         try:
-            # Use rule-level container image if specified via resources,
-            # otherwise fall back to global container image
-            container_image = job.resources.get(
-                "aws_batch_container_image", self.container_image
-            )
-
             job_definition = BatchJobBuilder(
                 logger=self.logger,
                 job=job,
