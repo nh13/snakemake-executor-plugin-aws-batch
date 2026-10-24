@@ -384,7 +384,9 @@ class Executor(RemoteExecutor):
                 else:
                     message = f"AWS Batch job failed. Code: {status_code}, Msg: {msg}."
                     self.report_job_error(job, msg=message)
-                self.cleanup_job_resources(job)
+                # The job already reached SUCCEEDED/FAILED, so there is nothing
+                # to terminate: only its job definition is left to clean up.
+                self._deregister_job(job)
             else:
                 yield job
 
@@ -504,7 +506,7 @@ class Executor(RemoteExecutor):
             )
 
     def cleanup_job_resources(self, job: SubmittedJobInfo):
-        """Terminate and deregister job resources"""
+        """Terminate and deregister the resources of a job that may still be live"""
         self._terminate_job(job)
         self._deregister_job(job)
 

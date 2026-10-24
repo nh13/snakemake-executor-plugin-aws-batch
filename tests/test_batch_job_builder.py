@@ -1927,6 +1927,66 @@ class TestDeregisterSkipsPreexisting:
         executor.batch_client.deregister_job_definition.assert_not_called()
 
 
+class TestFinishedJobCleanup:
+    """A job that reached a terminal state is deregistered but never terminated."""
+
+    def _make_executor(self):
+        import contextlib
+
+        from snakemake_executor_plugin_aws_batch import Executor
+
+        executor = object.__new__(Executor)
+        executor.logger = MagicMock()
+        executor.batch_client = MagicMock()
+        executor.status_rate_limiter = contextlib.AsyncExitStack()
+        executor.report_job_success = MagicMock()
+        executor.report_job_error = MagicMock()
+        return executor
+
+    def _check(self, executor, job):
+        import asyncio
+
+        async def drain():
+            return [j async for j in executor.check_active_jobs([job])]
+
+        return asyncio.run(drain())
+
+    @pytest.mark.parametrize(
+        "status,exit_code", [("SUCCEEDED", 0), ("FAILED", 3)], ids=["ok", "failed"]
+    )
+    def test_terminal_job_is_not_terminated(self, status, exit_code):
+        executor = self._make_executor()
+        executor._get_job_status = MagicMock(return_value=(exit_code, "reason"))
+        job = MagicMock()
+        job.aux = {"job_definition_arn": "arn:aws:batch:::job-definition/def:1"}
+
+        assert self._check(executor, job) == []
+        executor.batch_client.terminate_job.assert_not_called()
+        executor.batch_client.deregister_job_definition.assert_called_once_with(
+            jobDefinition="arn:aws:batch:::job-definition/def:1"
+        )
+
+    def test_active_job_is_left_alone(self):
+        executor = self._make_executor()
+        executor._get_job_status = MagicMock(return_value=(None, None))
+        job = MagicMock()
+
+        assert self._check(executor, job) == [job]
+        executor.batch_client.terminate_job.assert_not_called()
+        executor.batch_client.deregister_job_definition.assert_not_called()
+
+    def test_cancel_still_terminates(self):
+        executor = self._make_executor()
+        job = MagicMock()
+        job.external_jobid = "abc-123"
+        job.aux = {}
+
+        executor.cancel_jobs([job])
+        executor.batch_client.terminate_job.assert_called_once_with(
+            jobId="abc-123", reason="terminated by snakemake"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tests for the default-mode job-role requirement in build_job_definition
 # ---------------------------------------------------------------------------
