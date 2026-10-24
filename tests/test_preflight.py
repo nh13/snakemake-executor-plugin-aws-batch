@@ -512,16 +512,19 @@ class TestPreflightCheckTags:
             ex._preflight_check_tags()
         ex.batch_client.tag_resource.assert_called_once()
 
-    def test_missing_permission_warns_not_raises(self):
-        # A queue-tag denial is only a heuristic hint (the probe tags the queue,
-        # jobs are tagged on job/job-definition), so it warns loudly rather than
-        # blocking a possibly-valid run.
+    def test_missing_permission_is_reported_not_raised(self):
+        # A queue-tag denial is inconclusive (the probe tags the queue with none
+        # of the configured tags; jobs are tagged on job/job-definition), so it
+        # is reported at info rather than warning or blocking a possibly-valid
+        # run.
         ex = _executor(tags={"Env": "prod"})
         ex.batch_client.tag_resource.side_effect = self._access_denied()
         ex._preflight_check_tags()  # must not raise
-        assert ex.logger.warning.called
-        warned = " ".join(str(c) for c in ex.logger.warning.call_args_list)
-        assert "batch:TagResource" in warned
+        ex.logger.warning.assert_not_called()
+        assert ex.logger.info.called
+        reported = " ".join(str(c) for c in ex.logger.info.call_args_list)
+        assert "batch:TagResource" in reported
+        assert "inconclusive" in reported
 
     def test_non_permission_error_degrades(self):
         ex = _executor(tags={"Env": "prod"})
@@ -529,15 +532,17 @@ class TestPreflightCheckTags:
             {"Error": {"Code": "ThrottlingException"}}, "TagResource"
         )
         ex._preflight_check_tags()  # must not raise
+        ex.logger.warning.assert_called_once()
 
     @pytest.mark.parametrize("code", ["AccessDeniedException", "UnauthorizedOperation"])
-    def test_alternate_access_denied_codes_warn(self, code):
+    def test_alternate_access_denied_codes_are_reported(self, code):
         ex = _executor(tags={"Env": "prod"})
         ex.batch_client.tag_resource.side_effect = ClientError(
             {"Error": {"Code": code}}, "TagResource"
         )
         ex._preflight_check_tags()  # must not raise
-        assert ex.logger.warning.called
+        ex.logger.warning.assert_not_called()
+        assert ex.logger.info.called
 
     def test_http_forbidden_status_is_access_denied(self):
         # A permissions failure signalled only by HTTP 403 (unrecognized code).

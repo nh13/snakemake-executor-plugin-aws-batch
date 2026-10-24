@@ -528,12 +528,14 @@ built), plus the optional `iam:GetRole` for the job-role check and
 When tags are configured (via `--aws-batch-tags` or the
 `SNAKEMAKE_AWS_BATCH_JOB_TAGS` environment variable), the executor additionally
 runs a tag/untag round-trip on the job queue as a best-effort *proxy* for the
-`batch:TagResource` permission, so a missing permission surfaces as a warning at
+`batch:TagResource` permission, so a likely-missing permission is reported at
 startup rather than only as an opaque `AccessDenied` an hour into the run. It
-probes the queue, whereas jobs are tagged on the job and job-definition
-resources, so an IAM policy that scopes `batch:TagResource` per resource cannot
-be fully verified this way — a denial is therefore logged as a warning (it does
-**not** block the run) and a pass is a strong hint, not a guarantee. The probe
+probes the queue with a throwaway tag, whereas jobs are tagged on the job and
+job-definition resources with the configured tags, so an IAM policy that scopes
+`batch:TagResource` per resource, or conditions it on the request's tags
+(`aws:RequestTag` / `aws:TagKeys`), cannot be verified this way — a denial is
+therefore inconclusive and logged at info (it does **not** block the run), and
+a pass is a strong hint, not a guarantee. The probe
 needs `batch:TagResource` (and `batch:UntagResource` to remove the throwaway
 `snakemake-preflight` tag it writes; if that cleanup untag is denied, the tag is
 left on the queue). Depending on your account's tag-authorization settings you

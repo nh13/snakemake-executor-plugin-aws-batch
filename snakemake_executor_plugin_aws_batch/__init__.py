@@ -573,19 +573,22 @@ class Executor(RemoteExecutor):
         time, so a missing ``batch:TagResource`` would otherwise surface as an
         opaque ``AccessDenied`` an hour into the run. This runs a tag/untag
         round-trip on the job queue ARN as a *proxy* for that permission and
-        warns loudly if it is denied (it does not fail fast or raise).
+        reports a denial (it does not fail fast or raise).
 
         The probe is a heuristic, not a proof: jobs are tagged on the *job* and
         *job-definition* resources (via ``submit_job`` / ``register_job_definition``),
         not the queue, so an IAM policy that scopes ``batch:TagResource`` per
         resource-type/ARN could grant it on the queue while denying it on the
-        job/job-definition resources (or the reverse). Treat a pass as "the
-        permission is very likely present" and a denial as "very likely
-        missing", not a guarantee either way.
+        job/job-definition resources (or the reverse). And the probe sends only
+        its throwaway tag, not the configured ones, so a policy that conditions
+        ``batch:TagResource`` on the request's tags (``aws:RequestTag`` /
+        ``aws:TagKeys``) denies the probe yet allows every tagged submit. Treat
+        a pass as "the permission is very likely present" and a denial as
+        inconclusive, which is why a denial is logged at info, not warning.
 
-        Best-effort: nothing here raises — a permissions denial is surfaced as
-        a warning, and any other error (or a missing queue ARN / no tags
-        configured) is a silent no-op. Each probe uses a unique
+        Best-effort: nothing here raises — a permissions denial is logged at
+        info, any other error is logged as a warning, and a missing queue ARN /
+        no tags configured is a silent no-op. Each probe uses a unique
         ``snakemake-preflight-<uuid>`` tag key so it never overwrites or deletes
         a user-managed tag on the queue. If the cleanup untag fails, that
         throwaway key is left on the job queue (logged at warning) — so the
@@ -625,21 +628,21 @@ class Executor(RemoteExecutor):
                 )
         except ClientError as e:
             if _is_access_denied(e):
-                # A denial here is only a *hint* — the probe tags the queue, but
-                # jobs are tagged on the job / job-definition resources, so a
-                # per-resource-scoped policy could grant it there while denying
-                # it on the queue. Warn loudly (do not block a possibly-valid
-                # run), consistent with the rest of preflight's warn-on-
-                # uncertainty behavior.
-                self.logger.warning(
-                    "AWS Batch tag-permission preflight: the executor role was "
-                    f"denied batch:TagResource on the job queue ({queue_arn}), "
-                    "and tags are configured, so job tagging at submit time may "
-                    "fail with AccessDenied. This probe checks the queue as a "
-                    "proxy; a per-resource policy that grants batch:TagResource "
-                    "on the job / job-definition resources is fine. Otherwise "
-                    "grant it there (and ecs:TagResource if your account "
-                    "requires it), or unset the tags."
+                # A denial here is inconclusive: a per-resource-scoped policy
+                # may grant it on the job / job-definition resources only, and a
+                # policy conditioned on the request's tags denies this probe
+                # (which carries none of them) while allowing tagged submits.
+                # Say so at info rather than warn on a run that may be fine.
+                self.logger.info(
+                    "AWS Batch tag-permission preflight inconclusive: "
+                    f"batch:TagResource on the job queue ({queue_arn}) was "
+                    "denied for a throwaway probe tag. Policies that scope it "
+                    "per resource, or condition it on the request's tags "
+                    "(aws:RequestTag / aws:TagKeys), deny this probe yet allow "
+                    "tagged submits. If a submit then fails with AccessDenied, "
+                    "grant batch:TagResource on the job queue, jobs and job "
+                    "definitions (and ecs:TagResource if your account requires "
+                    "it), or unset the tags."
                 )
             else:
                 self.logger.warning(
