@@ -770,8 +770,10 @@ class Executor(RemoteExecutor):
         """Verify the configured job role exists (best-effort; needs iam:GetRole).
 
         A confirmed-missing role (``NoSuchEntity``) fails fast; anything else
-        (most importantly a missing ``iam:GetRole`` permission) degrades silently
-        so the check never blocks a workflow on uncertainty.
+        degrades so the check never blocks a workflow on uncertainty. A denied
+        ``iam:GetRole`` is logged at debug only: least-privilege executor roles
+        commonly lack it (the job role is passed to Batch, never read), so it is
+        not a problem worth a warning on every run. Other failures still warn.
         """
         role_arn = getattr(self.settings, "job_role", None)
         if not role_arn or "/" not in role_arn:
@@ -788,10 +790,13 @@ class Executor(RemoteExecutor):
                 raise WorkflowError(
                     f"Configured AWS Batch job role does not exist: {role_arn}"
                 ) from e
-            self.logger.warning(
-                "skipping AWS Batch job-role preflight check "
-                f"(likely missing iam:GetRole): {e}"
-            )
+            if _is_access_denied(e):
+                self.logger.debug(
+                    "skipping AWS Batch job-role preflight check: the executor "
+                    f"role may not call iam:GetRole on {role_arn}"
+                )
+                return
+            self.logger.warning(f"skipping AWS Batch job-role preflight check: {e}")
         except Exception as e:
             self.logger.warning(f"skipping AWS Batch job-role preflight check: {e}")
 

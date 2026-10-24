@@ -588,6 +588,18 @@ class TestValidateJobRole:
         iam = self._iam(side_effect=self._client_error("AccessDenied"))
         with patch("boto3.client", return_value=iam):
             ex._validate_job_role()  # must not raise
+        # A least-privilege executor role without iam:GetRole is expected, so
+        # the skip is logged at debug, not warning.
+        ex.logger.warning.assert_not_called()
+        ex.logger.debug.assert_called_once()
+        assert "iam:GetRole" in ex.logger.debug.call_args.args[0]
+
+    def test_other_client_error_warns(self):
+        ex = _executor(job_role="arn:aws:iam::1:role/maybe")
+        iam = self._iam(side_effect=self._client_error("Throttling"))
+        with patch("boto3.client", return_value=iam):
+            ex._validate_job_role()  # must not raise
+        ex.logger.warning.assert_called_once()
 
     def test_existing_role_passes_with_bare_name(self):
         # A pathed ARN must resolve to the final segment for GetRole.

@@ -515,8 +515,10 @@ a clear error.
 
 The check is deliberately conservative about *uncertainty*: a transient API
 error, a queue mid-update (`status` `CREATING`/`UPDATING`), or a missing
-`iam:GetRole` or `logs:DescribeLogGroups` permission is logged as a warning and
-the check is skipped rather than failing the workflow. It reuses the
+`logs:DescribeLogGroups` permission is logged as a warning and the check is
+skipped rather than failing the workflow. A missing `iam:GetRole` skips the
+job-role check too, but is logged only at debug, since a least-privilege
+executor role often lacks it by design. It reuses the
 `batch:DescribeJobQueues` / `batch:DescribeComputeEnvironments` permissions the
 executor already needs for platform detection (so a run missing those is not
 blocked by preflight, but will still fail later when the job definition is
