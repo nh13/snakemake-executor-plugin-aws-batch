@@ -246,6 +246,30 @@ class TestEmit:
         assert len(records) == 1
         assert getattr(records[0], remote_state.WIRE_KEY)["phase"] == "running"
 
+    def test_emit_message_is_preformatted(self):
+        # Snakemake 9's DefaultFormatter prints record.msg as is, without
+        # applying record.args, so the message must carry no %-placeholders.
+        import logging
+
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        logger = logging.getLogger("test.remote_state.preformatted")
+        logger.setLevel(logging.INFO)
+        handler = _Capture()
+        logger.addHandler(handler)
+        try:
+            remote_state.emit(
+                logger, {"jobid": 7, "phase": "running", "external_jobid": "abc"}
+            )
+        finally:
+            logger.removeHandler(handler)
+        assert records[0].msg == "remote job abc -> running"
+        assert not records[0].args
+
 
 class TestEmitDedup:
     """The executor emits once per phase transition (via job.aux).

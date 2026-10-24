@@ -186,9 +186,11 @@ def emit(logger: Any, payload: Optional[dict]) -> None:
     # caller (which would otherwise retry on every poll).
     if not isinstance(logger, logging.Logger):
         return
+    # Format the message here rather than passing %-style args: Snakemake 9's
+    # DefaultFormatter prints ``record.msg`` as is (never ``getMessage()``), so
+    # lazy args would reach the console as a literal "remote job %s -> %s".
+    job_id = payload.get("external_jobid", payload.get("jobid"))
     logger.info(
-        "remote job %s -> %s",
-        payload.get("external_jobid", payload.get("jobid")),
-        payload.get("phase"),
+        f"remote job {job_id} -> {payload.get('phase')}",
         extra={WIRE_KEY: payload},
     )
