@@ -38,6 +38,16 @@ PRIVILEGED_WITH_JOB_DEFINITION_ERROR = (
     "definition. Remove --aws-batch-privileged or omit --aws-batch-job-definition."
 )
 
+# Why --aws-batch-privileged cannot be used with --aws-batch-job-definition-map.
+# The executor refuses the combination at startup; the builder raises this for a
+# job on a mapped definition when built without that check.
+PRIVILEGED_WITH_JOB_DEFINITION_MAP_ERROR = (
+    "Cannot combine --aws-batch-privileged with --aws-batch-job-definition-map: "
+    "whether the container is privileged is set in the pre-registered job "
+    "definition the map names for the job's image. Remove --aws-batch-privileged "
+    "or the job definition map."
+)
+
 
 def _is_tbd(value: Any) -> bool:
     """Whether ``value`` is Snakemake's not-yet-evaluable resource placeholder."""
@@ -788,10 +798,10 @@ class BatchJobBuilder:
         ``--aws-batch-privileged`` applies only to the definitions the plugin
         registers.  A rule with its own ``aws_batch_job_definition`` resource
         takes ``privileged`` from that definition, which the setting does not
-        reach; with the global ``--aws-batch-job-definition`` the setting can
-        never apply and is refused (normally already at preflight).  The
-        ``aws_batch_privileged`` resource is refused if any member of a group
-        job sets it.
+        reach; with the global ``--aws-batch-job-definition`` or a definition
+        from the job definition map the setting can never apply and is refused
+        (normally already at startup).  The ``aws_batch_privileged`` resource is
+        refused if any member of a group job sets it.
 
         ``container_image`` cannot be distinguished from its default value so we
         document in the setting help text that it is ignored and do not raise here.
@@ -824,15 +834,18 @@ class BatchJobBuilder:
                 raise WorkflowError(
                     "Cannot combine the aws_batch_privileged resource of rule "
                     f"{member.name} with a pre-existing job definition "
-                    "(--aws-batch-job-definition or the per-rule "
-                    "aws_batch_job_definition resource): whether the container is "
+                    "(--aws-batch-job-definition, the per-rule "
+                    "aws_batch_job_definition resource, or "
+                    "--aws-batch-job-definition-map): whether the container is "
                     "privileged is set in the pre-existing job definition.  Remove "
                     "the aws_batch_privileged resource or the pre-existing job "
                     "definition."
                 )
         # The setting does not reach a rule's own (per-rule) definition, but can
-        # never apply with the global one.
+        # never apply with the global one or a mapped one.
         per_rule_definition = self.job.resources.get("aws_batch_job_definition")
+        if self.settings.privileged and self.mapped_job_definition is not None:
+            raise WorkflowError(PRIVILEGED_WITH_JOB_DEFINITION_MAP_ERROR)
         if self.settings.privileged and not per_rule_definition:
             raise WorkflowError(PRIVILEGED_WITH_JOB_DEFINITION_ERROR)
         if getattr(self.settings, "log_group", None):

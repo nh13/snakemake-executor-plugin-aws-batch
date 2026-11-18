@@ -39,6 +39,7 @@ from snakemake_interface_executor_plugins.settings import (
     CommonSettings,
 )
 from snakemake_interface_executor_plugins.jobs import (
+    GroupJobExecutorInterface,
     JobExecutorInterface,
 )
 from snakemake_interface_common.exceptions import WorkflowError
@@ -241,8 +242,8 @@ class ExecutorSettings(ExecutorSettingsBase):
                 "before 3.14 a quoted inline value can make it fail to load the "
                 "profile (ENAMETOOLONG). Cannot be combined with "
                 "--aws-batch-job-definition, --aws-batch-job-role, "
-                "--aws-batch-log-group, or the per-rule aws_batch_job_definition "
-                "resource."
+                "--aws-batch-log-group, --aws-batch-privileged, or the per-rule "
+                "aws_batch_job_definition or aws_batch_privileged resource."
             ),
             "env_var": True,
             "required": False,
@@ -261,7 +262,8 @@ class ExecutorSettings(ExecutorSettingsBase):
                 "container (--software-deployment-method apptainer) or mounting a "
                 "FUSE file system. A rule can override it with the "
                 "aws_batch_privileged resource. Rejected at startup with "
-                "--aws-batch-job-definition; a rule that uses the per-rule "
+                "--aws-batch-job-definition or --aws-batch-job-definition-map; a "
+                "rule that uses the per-rule "
                 "aws_batch_job_definition resource gets privileged from that "
                 "definition instead."
             ),
@@ -371,9 +373,14 @@ class Executor(RemoteExecutor):
         """Warn when jobs deploy software with Apptainer but registered job
         definitions are not privileged: Apptainer inside the job's container
         generally needs the privileges --aws-batch-privileged grants, which are
-        off by default. Skipped with --aws-batch-job-definition, whose
-        definition decides whether its container is privileged."""
-        if self.settings.privileged or self.settings.job_definition:
+        off by default. Skipped with --aws-batch-job-definition or
+        --aws-batch-job-definition-map, whose definitions decide whether their
+        containers are privileged."""
+        if (
+            self.settings.privileged
+            or self.settings.job_definition
+            or self.settings.job_definition_map
+        ):
             return
         methods = self.workflow.deployment_settings.deployment_method
         if DeploymentMethod.APPTAINER in methods:
@@ -468,10 +475,10 @@ class Executor(RemoteExecutor):
         """Load the job definition map setting, refusing the settings it excludes.
 
         The map chooses every job's definition by the job's image, so a global
-        pre-existing definition would be ambiguous, and the job role and log group
-        are baked into the pre-registered definitions, where the plugin cannot set
-        them. Raises ``WorkflowError`` for those combinations and for a map that
-        cannot be read.
+        pre-existing definition would be ambiguous, and the job role, log group and
+        whether the container is privileged are baked into the pre-registered
+        definitions, where the plugin cannot set them. Raises ``WorkflowError`` for
+        those combinations and for a map that cannot be read.
         """
         value = self.settings.job_definition_map
         if not value:
@@ -484,6 +491,7 @@ class Executor(RemoteExecutor):
                 ("--aws-batch-job-definition", "job_definition"),
                 ("--aws-batch-job-role (or SNAKEMAKE_AWS_BATCH_JOB_ROLE)", "job_role"),
                 ("--aws-batch-log-group", "log_group"),
+                ("--aws-batch-privileged", "privileged"),
             )
             if getattr(self.settings, name)
         ]
@@ -493,8 +501,9 @@ class Executor(RemoteExecutor):
                 "(--aws-batch-job-definition-map or "
                 f"SNAKEMAKE_AWS_BATCH_JOB_DEFINITION_MAP) with {', '.join(conflicts)}: "
                 "every job runs on the pre-registered definition the map names for "
-                "its image, which carries its own job role and log configuration; "
-                "remove the option or unset the environment variable"
+                "its image, which carries its own job role, log configuration and "
+                "privileged setting; remove the option or unset the environment "
+                "variable"
             )
         inline = JobDefinitionMap.is_inline(value)
         try:
@@ -530,10 +539,12 @@ class Executor(RemoteExecutor):
         Raises ``WorkflowError`` (the job fails without being submitted) when the
         image is not in the map, when the rule names its own definition with the
         ``aws_batch_job_definition`` resource (the map, not the workflow, chooses the
-        definition), or, when ``shm_size`` is set, when the definition is not ACTIVE,
-        is not a container definition, or is for EC2 and sets less shared memory.
-        On a Fargate definition, which cannot set ``/dev/shm``, ``shm_size`` is
-        ignored with a warning.
+        definition), when the rule (or any member of a group job) sets the
+        ``aws_batch_privileged`` resource (the mapped definition decides whether its
+        container is privileged), or, when ``shm_size`` is set, when the definition
+        is not ACTIVE, is not a container definition, or is for EC2 and sets less
+        shared memory. On a Fargate definition, which cannot set ``/dev/shm``,
+        ``shm_size`` is ignored with a warning.
         """
         if self.job_definition_map is None:
             return None
@@ -545,6 +556,20 @@ class Executor(RemoteExecutor):
                 "definition map: the map chooses each job's definition by its image; "
                 "remove the aws_batch_job_definition resource from the rule"
             )
+        # Per member: a group's own resources sum parallel members' integers.
+        members = job.jobs if isinstance(job, GroupJobExecutorInterface) else [job]
+        for member in members:
+            rule_privileged = member.resources.get("aws_batch_privileged")
+            if rule_privileged is not None:
+                where = (
+                    job.name if member is job else f"{job.name} (rule {member.name})"
+                )
+                raise WorkflowError(
+                    f"{where}: cannot set aws_batch_privileged={rule_privileged!r} "
+                    "with a job definition map: whether the container is privileged "
+                    "is set in the pre-registered definition the map names for its "
+                    "image; remove the resource"
+                )
         job_definition = self.job_definition_map.require(container_image, job.name)
         if shm_size is None:
             return job_definition

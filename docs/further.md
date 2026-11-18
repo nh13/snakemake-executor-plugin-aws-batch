@@ -265,9 +265,11 @@ before submitting; when `SubmitJob` refuses the overrides, the job fails with th
 the overrides sent, so run smaller groups or pass fewer environment variables. The same
 applies to any [pre-existing job definition](#pre-existing-job-definitions).
 
-The job role, log configuration and shared memory size come from the definitions. So
-`--aws-batch-job-role`, `--aws-batch-log-group` and `--aws-batch-job-definition` are
-refused at startup with the map. A rule's `shared_memory_size_mb` resource is accepted
+The job role, log configuration, privileged setting and shared memory size come from
+the definitions. So `--aws-batch-job-role`, `--aws-batch-log-group`,
+`--aws-batch-privileged` and `--aws-batch-job-definition` are refused at startup with the
+map, and a rule's `aws_batch_privileged` resource (on any member of a group job) fails
+that job without it being submitted. A rule's `shared_memory_size_mb` resource is accepted
 when it is at most the definition's `linuxParameters.sharedMemorySize` (the job then runs
 with the definition's size). It fails the job when it is larger, when an EC2 definition
 sets no `sharedMemorySize`, when the definition is not ACTIVE, or when it is not a
@@ -517,18 +519,21 @@ resource unset or the resource is a function of inputs that do not exist yet
 when the group is submitted.
 
 With Apptainer and without `--aws-batch-privileged`, the executor warns at
-startup, naming both ways to opt in; with `--aws-batch-job-definition` it does
-not, since that definition decides. Setting the `aws_batch_privileged` resource
+startup, naming both ways to opt in; with `--aws-batch-job-definition` or a
+[job definition map](#job-definition-map) it does not, since those definitions
+decide. Setting the `aws_batch_privileged` resource
 on the rules that need it does not silence the warning, because the executor
 cannot see rule resources at startup.
 
 A [pre-existing job definition](#pre-existing-job-definitions) sets `privileged`
 itself. `--aws-batch-privileged` is rejected at startup with the global
-`--aws-batch-job-definition`; a rule with its own `aws_batch_job_definition`
+`--aws-batch-job-definition` and with a [job definition
+map](#job-definition-map); a rule with its own `aws_batch_job_definition`
 resource takes `privileged` from that definition, and the setting does not reach
 it. The `aws_batch_privileged` resource on a rule that uses a pre-existing job
 definition (or on any member of such a group job) is rejected when that job is
-submitted, which stops the workflow with an error.
+submitted, which stops the workflow with an error; with a job definition map it
+fails that job instead.
 
 Earlier releases made every job container privileged; a workflow that relied
 on that now needs `--aws-batch-privileged` (or the `aws_batch_privileged`
@@ -637,11 +642,12 @@ definition:
 - `--aws-batch-privileged` (`privileged`) and the per-rule `aws_batch_privileged`
   resource: whether the container is privileged is a definition-level field.
   `--aws-batch-privileged` combined with the global `--aws-batch-job-definition`
-  is rejected at **startup** (preflight); it applies only to the definitions the
-  plugin registers, so a rule with its own `aws_batch_job_definition` resource
-  takes `privileged` from that definition (not rejected). The
-  `aws_batch_privileged` resource is rejected when a job using a pre-existing
-  definition is submitted, which stops the workflow with an error.
+  or a [job definition map](#job-definition-map) is rejected at **startup**; it
+  applies only to the definitions the plugin registers, so a rule with its own
+  `aws_batch_job_definition` resource takes `privileged` from that definition
+  (not rejected). The `aws_batch_privileged` resource is rejected when a job
+  using a pre-existing definition is submitted, which stops the workflow with an
+  error (with a job definition map, it fails that job).
 
 With `--aws-batch-job-definition` or the per-rule `aws_batch_job_definition`
 resource, the `--aws-batch-container-image` (`container_image`) setting and the

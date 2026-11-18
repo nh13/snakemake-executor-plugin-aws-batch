@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from snakemake_interface_common.exceptions import WorkflowError
+from snakemake_interface_executor_plugins.jobs import GroupJobExecutorInterface
 
 from snakemake_executor_plugin_aws_batch import Executor, ExecutorSettings
 from snakemake_executor_plugin_aws_batch.batch_client import BatchClient
@@ -18,6 +19,9 @@ from snakemake_executor_plugin_aws_batch.image_map import ImageMap
 from snakemake_executor_plugin_aws_batch.job_definition_map import (
     JobDefinitionMap,
     describe_job_definition,
+)
+from snakemake_executor_plugin_aws_batch.batch_job_builder import (
+    PRIVILEGED_WITH_JOB_DEFINITION_MAP_ERROR,
 )
 from tests.helpers import post_init_executor
 
@@ -273,6 +277,7 @@ def test_a_malformed_job_definition_fails_the_run():
             "--aws-batch-job-role (or SNAKEMAKE_AWS_BATCH_JOB_ROLE)",
         ),
         ({"log_group": "/snakemake/x"}, "--aws-batch-log-group"),
+        ({"privileged": True}, "--aws-batch-privileged"),
         (
             {"job_role": "arn:aws:iam::1:role/r", "log_group": "/snakemake/x"},
             "--aws-batch-job-role (or SNAKEMAKE_AWS_BATCH_JOB_ROLE), "
@@ -443,6 +448,65 @@ def test_a_per_rule_job_definition_fails_the_job():
         "job's definition by its image; remove the aws_batch_job_definition resource "
         "from the rule"
     )
+
+
+@pytest.mark.parametrize("privileged", [True, False, "true"])
+def test_a_per_rule_privileged_resource_fails_the_job(privileged):
+    # The mapped definition decides whether its container is privileged.
+    executor = _executor({"global:1": "global-def:1"})
+    executor.run_job(_job(aws_batch_privileged=privileged))
+    assert _error(executor) == (
+        f"rule_a: cannot set aws_batch_privileged={privileged!r} with a job "
+        "definition map: whether the container is privileged is set in the "
+        "pre-registered definition the map names for its image; remove the resource"
+    )
+    executor.batch_client.register_job_definition.assert_not_called()
+
+
+def test_a_group_members_privileged_resource_fails_the_job():
+    # Each member is checked: a group's own resources sum its members' integers.
+    executor = _executor({"global:1": "global-def:1"})
+    group = MagicMock(spec=GroupJobExecutorInterface)
+    group.name = "group_a"
+    group.threads = 2
+    group.resources = {"_cores": 2, "mem_mb": 4096}
+    group.jobs = [_job("rule_a"), _job("rule_b", aws_batch_privileged=False)]
+    executor.run_job(group)
+    assert _error(executor).startswith(
+        "group_a (rule rule_b): cannot set aws_batch_privileged=False with a job "
+        "definition map"
+    )
+    executor.batch_client.register_job_definition.assert_not_called()
+
+
+def test_the_builder_refuses_a_privileged_resource_on_a_mapped_definition():
+    # Normally the executor fails the job first; the builder refuses it too, and
+    # names the map among the pre-existing definitions.
+    executor = _executor({"global:1": "global-def:1"})
+    with patch.object(
+        Executor, "_mapped_job_definition", return_value="global-def:1"
+    ), pytest.raises(WorkflowError) as err:
+        executor.run_job(_job(aws_batch_privileged=True))
+    assert (
+        "Cannot combine the aws_batch_privileged resource of rule rule_a with a "
+        "pre-existing job definition (--aws-batch-job-definition, the per-rule "
+        "aws_batch_job_definition resource, or --aws-batch-job-definition-map)"
+    ) in str(err.value)
+    executor.batch_client.submit_job.assert_not_called()
+    executor.batch_client.register_job_definition.assert_not_called()
+
+
+def test_the_builder_refuses_the_privileged_setting_on_a_mapped_definition():
+    # Normally refused at startup; the builder's refusal names the map.
+    executor = _executor({"global:1": "global-def:1"})
+    executor.settings.privileged = True
+    with pytest.raises(WorkflowError) as err:
+        executor.run_job(_job())
+    assert str(err.value) == (
+        f"Failed to submit AWS Batch job: {PRIVILEGED_WITH_JOB_DEFINITION_MAP_ERROR}"
+    )
+    executor.batch_client.submit_job.assert_not_called()
+    executor.batch_client.register_job_definition.assert_not_called()
 
 
 def test_shared_memory_up_to_the_definitions_size_is_accepted():

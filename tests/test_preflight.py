@@ -776,6 +776,14 @@ def test_apptainer_with_a_global_job_definition_does_not_warn():
     executor.logger.warning.assert_not_called()
 
 
+def test_apptainer_with_a_job_definition_map_does_not_warn():
+    # The mapped definitions decide whether their containers are privileged.
+    executor = post_init_executor(
+        {DeploymentMethod.APPTAINER}, job_definition_map='{"global:1": "def:1"}'
+    )
+    executor.logger.warning.assert_not_called()
+
+
 def test_privileged_with_a_global_job_definition_fails_preflight():
     ex = _executor(job_role=None, job_definition="my-def:3", privileged=True)
     with pytest.raises(
