@@ -19,6 +19,7 @@ from snakemake_executor_plugin_aws_batch.job_definition_map import (
     JobDefinitionMap,
     describe_job_definition,
 )
+from tests.helpers import post_init_executor
 
 DEF_ARN = "arn:aws:batch:us-east-1:123456789012:job-definition/samtools:4"
 
@@ -218,27 +219,12 @@ def test_the_setting_is_an_executor_setting_with_an_env_var():
     assert fields["job_definition_map"].metadata["env_var"] is True
 
 
-def _post_init(**settings) -> Executor:
-    """Run Executor.__post_init__ with the given executor settings (AWS mocked)."""
-    executor = object.__new__(Executor)
-    executor.logger = MagicMock()
-    executor.workflow = SimpleNamespace(
-        remote_execution_settings=SimpleNamespace(container_image="global:1"),
-        executor_settings=ExecutorSettings(region="us-east-1", **settings),
-    )
-    with patch("snakemake_executor_plugin_aws_batch.BatchClient"), patch.object(
-        Executor, "_preflight_validate"
-    ):
-        executor.__post_init__()
-    return executor
-
-
 def test_no_map_is_loaded_without_the_setting():
-    assert _post_init().job_definition_map is None
+    assert post_init_executor().job_definition_map is None
 
 
 def test_the_map_is_loaded_from_an_inline_setting():
-    executor = _post_init(job_definition_map='{"global:1": "def:1"}')
+    executor = post_init_executor(job_definition_map='{"global:1": "def:1"}')
     assert executor.job_definition_map.require("global:1", "rule a") == "def:1"
     executor.logger.info.assert_called_once_with(
         "Jobs run on the pre-registered job definitions in the inline job "
@@ -249,7 +235,7 @@ def test_the_map_is_loaded_from_an_inline_setting():
 def test_the_map_is_loaded_from_a_file_setting(tmp_path):
     path = tmp_path / "defs.json"
     path.write_text(json.dumps({"global:1": "def:1"}))
-    executor = _post_init(job_definition_map=str(path))
+    executor = post_init_executor(job_definition_map=str(path))
     assert executor.job_definition_map.require("global:1", "rule a") == "def:1"
     executor.logger.info.assert_called_once_with(
         f"Jobs run on the pre-registered job definitions in {path} (1 entries)"
@@ -266,7 +252,7 @@ def test_the_map_is_loaded_from_a_file_setting(tmp_path):
 def test_a_map_that_cannot_be_read_fails_the_run(value, source, cause):
     want = f"Failed to read the job definition map ({source}): "
     with pytest.raises(WorkflowError, match=f"^{re.escape(want)}") as err:
-        _post_init(job_definition_map=value)
+        post_init_executor(job_definition_map=value)
     assert isinstance(err.value.__cause__, cause)
     hint = "(a value that does not start with '{' is read as the path of a file)"
     assert str(err.value).endswith(hint) == (cause is OSError)
@@ -275,7 +261,7 @@ def test_a_map_that_cannot_be_read_fails_the_run(value, source, cause):
 def test_a_malformed_job_definition_fails_the_run():
     want = "Failed to read the job definition map (given inline): job definition "
     with pytest.raises(WorkflowError, match=f"^{re.escape(want)}"):
-        _post_init(job_definition_map='{"global:1": "def:1 "}')
+        post_init_executor(job_definition_map='{"global:1": "def:1 "}')
 
 
 @pytest.mark.parametrize(
@@ -300,7 +286,7 @@ def test_the_map_refuses_settings_the_definitions_own(setting, option):
         f"SNAKEMAKE_AWS_BATCH_JOB_DEFINITION_MAP) with {option}: "
     )
     with pytest.raises(WorkflowError, match=f"^{re.escape(want)}") as err:
-        _post_init(job_definition_map='{"global:1": "def:1"}', **setting)
+        post_init_executor(job_definition_map='{"global:1": "def:1"}', **setting)
     assert str(err.value).endswith(
         "; remove the option or unset the environment variable"
     )
@@ -309,7 +295,7 @@ def test_the_map_refuses_settings_the_definitions_own(setting, option):
 def test_the_map_combines_with_the_container_image_map(tmp_path):
     path = tmp_path / "images.json"
     path.write_text(json.dumps({"global:1": "pinned:1"}))
-    executor = _post_init(
+    executor = post_init_executor(
         container_image_map=str(path), job_definition_map='{"pinned:1": "def:1"}'
     )
     image = executor.image_map.require("global:1", "rule a")
@@ -350,6 +336,7 @@ def _executor(definitions: dict, image_map=None, describe=None) -> Executor:
         job_role=None,
         job_definition=None,
         log_group=None,
+        privileged=False,
         tags=None,
         task_timeout=None,
     )
