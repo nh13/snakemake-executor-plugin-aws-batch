@@ -31,6 +31,7 @@ from snakemake_executor_plugin_aws_batch.job_definition_map import (
     arn_region,
     describe_job_definition,
 )
+from snakemake_executor_plugin_aws_batch.rule_queues import RuleQueues
 from snakemake_interface_executor_plugins.executors.base import SubmittedJobInfo
 from snakemake_interface_executor_plugins.executors.remote import RemoteExecutor
 from snakemake_interface_executor_plugins.settings import (
@@ -249,6 +250,22 @@ class ExecutorSettings(ExecutorSettingsBase):
             "required": False,
         },
     )
+    rule_queues: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "A JSON object mapping rule names to the AWS Batch job queues (name or "
+                "ARN) their jobs run on, or the path of a file holding it. A rule in "
+                "the map runs on its queue even if it sets the batch_queue resource; "
+                "other rules use batch_queue, else --aws-batch-job-queue. The rules of "
+                "a group job must all map to the same queue, or none be in the map. "
+                "Unlike --set-resources on the command line, it leaves the workflow "
+                "profile's set-resources in place."
+            ),
+            "env_var": True,
+            "required": False,
+        },
+    )
 
     privileged: bool = field(
         default=False,
@@ -321,6 +338,8 @@ class Executor(RemoteExecutor):
     image_map: Optional[ImageMap] = None
     # Set from the job_definition_map setting in __post_init__; None = no map.
     job_definition_map: Optional[JobDefinitionMap] = None
+    # Set from the rule_queues setting in __post_init__; None = no map.
+    rule_queues: Optional[RuleQueues] = None
 
     def __post_init__(self):
         # snakemake/snakemake:latest container image
@@ -359,6 +378,22 @@ class Executor(RemoteExecutor):
         # describe; a failed describe is not cached, so the next job retries it. See
         # _describe_mapped_job_definition.
         self._mapped_job_definition_cache: Dict[str, dict] = {}
+
+        rule_queues = self.settings.rule_queues
+        if rule_queues:
+            try:
+                self.rule_queues = RuleQueues.from_setting(rule_queues)
+            except (OSError, ValueError) as e:
+                inline = rule_queues.lstrip().startswith("{")
+                where = "" if inline else f" {rule_queues}"
+                raise WorkflowError(
+                    f"Failed to read the rule queue map{where} "
+                    f"(--aws-batch-rule-queues): {e}"
+                ) from e
+            self.logger.info(
+                f"Rules are sent to their queues through the rule queue map "
+                f"({len(self.rule_queues)} rules)"
+            )
 
         try:
             self.batch_client = BatchClient(region_name=self.settings.region)
@@ -419,6 +454,9 @@ class Executor(RemoteExecutor):
             mapped_job_definition = self._mapped_job_definition(
                 job, container_image, shm_size
             )
+            rule_queue = (
+                self.rule_queues.queue_of(job) if self.rule_queues is not None else None
+            )
         except WorkflowError as e:
             # Fail this job like any other failed job: jobs already running finish,
             # and --keep-going and restarts apply.
@@ -437,6 +475,7 @@ class Executor(RemoteExecutor):
                 # _mapped_job_definition has checked the job's shared_memory_size_mb
                 # against the definition it returned.
                 shared_memory_checked=mapped_job_definition is not None,
+                rule_queue=rule_queue,
             )
             job_info = job_definition.submit()
             log_info = {
