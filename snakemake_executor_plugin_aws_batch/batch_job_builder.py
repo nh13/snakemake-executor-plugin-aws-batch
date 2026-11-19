@@ -240,6 +240,7 @@ class BatchJobBuilder:
         batch_client: BatchClient,
         mapped_job_definition: Optional[str] = None,
         shared_memory_checked: bool = False,
+        rule_queue: Optional[str] = None,
     ):
         """
         :param mapped_job_definition: the pre-registered job definition the
@@ -253,6 +254,9 @@ class BatchJobBuilder:
             (accepted, or ignored with a warning on a Fargate definition). When
             ``True`` the resource is accepted on that definition; otherwise a
             pre-existing definition refuses it.
+        :param rule_queue: the job queue the rule queue map gives this job, or
+            ``None``. It outranks the ``batch_queue`` resource and the
+            ``job_queue`` setting.
         """
         self.logger = logger
         self.job = job
@@ -264,12 +268,27 @@ class BatchJobBuilder:
         self.mapped_job_definition = mapped_job_definition
         self.shared_memory_checked = shared_memory_checked
         self.created_job_defs = []
-        # Per-rule queue override via `resources.batch_queue` — lets a multi-arch
-        # workflow route each job to a queue wired to matching compute environment
-        # (e.g. ARM vs x86). Falls back to the profile-wide default queue.
-        self.job_queue = str(
-            self.job.resources.get("batch_queue", self.settings.job_queue)
+        # The queue the rule queue map (--aws-batch-rule-queues) gives the job's
+        # rule outranks its `batch_queue` resource: the map is the deployment's
+        # choice, made on the command line, which outranks the workflow's. Then the
+        # per-rule `batch_queue` resource — lets a multi-arch workflow route each job
+        # to a queue wired to matching compute environment (e.g. ARM vs x86). Falls
+        # back to the profile-wide default queue.
+        rule_batch_queue = self.job.resources.get("batch_queue")
+        self.job_queue = rule_queue or str(
+            rule_batch_queue
+            if rule_batch_queue is not None
+            else self.settings.job_queue
         )
+        if (
+            rule_queue
+            and rule_batch_queue is not None
+            and rule_queue != str(rule_batch_queue)
+        ):
+            self.logger.debug(
+                f"{self.job.name}: the rule queue map sends this job to {rule_queue}, "
+                f"not its batch_queue resource {rule_batch_queue}"
+            )
         # Platform (EC2/FARGATE) is resolved lazily on first access. Pre-existing
         # job definitions skip definition-building entirely, so they must not be
         # forced to hold batch:DescribeJobQueues / DescribeComputeEnvironments

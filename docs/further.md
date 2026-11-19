@@ -388,7 +388,54 @@ rule align:
     ...
 ```
 
-Platform detection and job submission both use the resolved per-rule queue.
+Platform detection and job submission both use the resolved per-rule queue. A
+deployment can also set rules' queues from the command line, with the
+[rule queue map](#rule-queue-map).
+
+## Rule queue map
+
+A deployment can also choose rules' queues without editing the workflow, by passing a
+JSON object mapping rule names to job queues (a name or a job queue ARN):
+
+```console
+snakemake --executor aws-batch \
+    --aws-batch-rule-queues '{"align": "arn:aws:batch:us-west-2:123456789012:job-queue/arm-queue", "call": "gpu-queue"}' ...
+# or: SNAKEMAKE_AWS_BATCH_RULE_QUEUES='{"align": ...}'
+# or a file holding the object: --aws-batch-rule-queues queues.json
+```
+
+A value whose first non-blank character is `{` is the map itself; anything else is the
+path of a file holding it, relative to the working directory. Keys are rule names as
+Snakemake gives them, including a `name:` directive's string and the number an unnamed
+rule gets (`"1"`, `"2"`, ...; it changes when rules are added before it, so name the rule
+instead).
+
+In a Snakemake profile, give a file path or the JSON object as a quoted string. Snakemake
+drops a YAML mapping given for this key without a message, so the map would silently not
+apply. A relative path in a profile is resolved against the profile's directory when the
+file is there. When the map is loaded, the executor logs `Rules are sent to their queues
+through the rule queue map (N rules)`.
+
+A job's queue is the map's entry for its rule, else the rule's `batch_queue` resource,
+else `--aws-batch-job-queue`. The map outranks `batch_queue` because it is the
+deployment's choice, made on the command line. Rules not in the map are unaffected, and an
+entry for a rule the workflow does not have is ignored. A rule in the map always runs on its
+map entry, so a `batch_queue` function that picks a queue by attempt (as in
+[Spot Reclaim Retries](#spot-reclaim-retries)) does not apply to it; leave such a rule out of
+the map.
+
+Unlike `--set-resources rule:batch_queue=...`, the map leaves every other resource alone:
+`--set-resources` given on the command line replaces the workflow profile's whole
+`set-resources`, so the profile's per-rule memory, runtime and other settings would be
+lost.
+
+A [group job](https://snakemake.readthedocs.io/en/stable/executing/grouping.html) runs as
+one AWS Batch job, on one queue, so the rules of a group must all map to the same queue,
+or none of them be in the map. A group job whose rules map to different queues, or only
+some of which are in the map, fails without being submitted, like any other failed job.
+
+A map that is not a JSON object, names a rule twice, has an empty key, or has a value that
+is not a job queue name or ARN, is refused at startup.
 
 # Task Timeout
 
