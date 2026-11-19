@@ -640,8 +640,39 @@ def test_a_bare_names_revision_is_described_once_per_run():
     describe["global-def"] = [_definition(4, 64)]
     executor.run_job(_job("rule_b", shared_memory_size_mb=2048))
     executor.report_job_error.assert_not_called()
-    assert executor.batch_client.submit_job.call_count == 2
     assert executor.batch_client.describe_job_definitions.call_count == 1
+    # Both jobs run on the revision that was checked, not whatever is latest when
+    # each is submitted.
+    submitted = [
+        c.kwargs["jobDefinition"]
+        for c in executor.batch_client.submit_job.call_args_list
+    ]
+    assert submitted == ["global-def:3", "global-def:3"]
+
+
+def test_a_bare_name_without_shared_memory_is_submitted_as_mapped():
+    # Nothing is checked, so nothing is described, and SubmitJob resolves the name.
+    executor = _executor({"global:1": "global-def"})
+    executor.run_job(_job())
+    executor.batch_client.describe_job_definitions.assert_not_called()
+    (call,) = executor.batch_client.submit_job.call_args_list
+    assert call.kwargs["jobDefinition"] == "global-def"
+
+
+@pytest.mark.parametrize(
+    "mapped",
+    [
+        "global-def:2",
+        "arn:aws:batch:eu-west-1:123456789012:job-definition/global-def:2",
+    ],
+)
+def test_a_mapped_revision_is_submitted_as_mapped(mapped):
+    describe = {mapped: [_definition(2, 4096)]}
+    executor = _executor({"global:1": mapped}, describe=describe)
+    executor.run_job(_job(shared_memory_size_mb=2048))
+    executor.report_job_error.assert_not_called()
+    (call,) = executor.batch_client.submit_job.call_args_list
+    assert call.kwargs["jobDefinition"] == mapped
 
 
 def test_a_definition_that_cannot_be_described_fails_the_job_and_is_retried():

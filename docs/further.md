@@ -282,9 +282,10 @@ stops the run (0 or empty counts as unset), as without the map.
 The check needs `batch:DescribeJobDefinitions`. A definition is described at most once
 per run after a successful describe; a failed describe is retried by the next job. A bare
 name is checked against its latest ACTIVE revision when a job first asks for shared
-memory on it, and that result is kept for the run, while `SubmitJob` resolves the latest
-revision on every submission; a revision registered during the run is therefore not
-checked. Map to `name:revision` when shared memory matters.
+memory on it, and every job that asks for shared memory on it is then submitted to that
+revision (`name:revision`), so a revision registered during the run is neither checked nor
+used by those jobs. A job that sets no shared memory is submitted to the bare name, which
+`SubmitJob` resolves to the latest ACTIVE revision.
 
 With a job definition map, the map decides every job's definition:
 `--aws-batch-job-definition` is refused at startup, and a rule's `aws_batch_job_definition`

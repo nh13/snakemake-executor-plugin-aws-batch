@@ -30,6 +30,7 @@ from snakemake_executor_plugin_aws_batch.job_definition_map import (
     JobDefinitionMap,
     arn_region,
     describe_job_definition,
+    job_definition_name,
 )
 from snakemake_executor_plugin_aws_batch.rule_queues import RuleQueues
 from snakemake_interface_executor_plugins.executors.base import SubmittedJobInfo
@@ -586,6 +587,10 @@ class Executor(RemoteExecutor):
         is not ACTIVE, is not a container definition, or is for EC2 and sets less
         shared memory. On a Fargate definition, which cannot set ``/dev/shm``,
         ``shm_size`` is ignored with a warning.
+
+        A bare name that was described is returned as ``name:revision`` of the
+        revision checked, so ``SubmitJob`` runs the job on exactly that revision rather
+        than on whichever is latest when it is submitted.
         """
         if self.job_definition_map is None:
             return None
@@ -615,6 +620,11 @@ class Executor(RemoteExecutor):
         if shm_size is None:
             return job_definition
         described = self._describe_mapped_job_definition(job_definition, job.name)
+        # The revision checked, which a bare name would not pin at submission.
+        name = job_definition_name(job_definition)
+        submitted = (
+            job_definition if name is None else f"{name}:{described['revision']}"
+        )
         where = (
             f"job definition {job_definition!r}, which the job definition map names "
             f"for {container_image!r}"
@@ -626,7 +636,7 @@ class Executor(RemoteExecutor):
                 f"Fargate {where}: Fargate cannot set /dev/shm "
                 "(linuxParameters.sharedMemorySize)"
             )
-            return job_definition
+            return submitted
         container_properties = described.get("containerProperties")
         if container_properties is None:
             raise WorkflowError(
@@ -652,7 +662,7 @@ class Executor(RemoteExecutor):
                 f"of {where}; lower the resource or register the definition with "
                 "more"
             )
-        return job_definition
+        return submitted
 
     def _describe_mapped_job_definition(
         self, job_definition: str, job_name: str
@@ -662,7 +672,9 @@ class Executor(RemoteExecutor):
 
         Cached for the run after a successful describe, so a bare name is a
         snapshot of its latest ACTIVE revision when a job first asked for shared
-        memory on it; a revision registered later in the run is not seen. Raises
+        memory on it, and those jobs are submitted to that revision (see
+        :meth:`_mapped_job_definition`); a revision registered later in the run is
+        not seen. Raises
         ``WorkflowError`` when the definition cannot be described (e.g. a missing
         ``batch:DescribeJobDefinitions`` permission), does not exist, or is not
         ACTIVE; a failure is not cached, so the next job tries again.

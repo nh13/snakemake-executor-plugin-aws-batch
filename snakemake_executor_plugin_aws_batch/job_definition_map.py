@@ -37,7 +37,7 @@ _NAME_AND_REVISION = re.compile(
 _FORMS = "a name, a name:revision pair, or a job definition ARN with a revision"
 
 
-def _job_definition_name(job_definition: str) -> Optional[str]:
+def job_definition_name(job_definition: str) -> Optional[str]:
     """The name of ``job_definition`` when it has no revision, ``None`` when it has
     one. Raises ``ValueError`` when it is not a ``name``, a ``name:revision`` pair or
     a job definition ARN with a revision.
@@ -101,7 +101,7 @@ class JobDefinitionMap(_ImageKeyedMap):
         if not isinstance(value, str):
             raise ValueError(f"{where}: {value!r} is not {_FORMS}")
         try:
-            _job_definition_name(value)
+            job_definition_name(value)
         except ValueError as e:
             raise ValueError(f"{where}: {e}") from e
 
@@ -126,7 +126,7 @@ def _describe_request(job_definition: str) -> Dict[str, Any]:
     revision (``name:revision`` or an ARN) through ``jobDefinitions``, a bare name
     through ``jobDefinitionName`` (its ACTIVE revisions, of which ``SubmitJob`` uses
     the highest)."""
-    name = _job_definition_name(job_definition)
+    name = job_definition_name(job_definition)
     if name is None:
         return {"jobDefinitions": [job_definition]}
     return {"jobDefinitionName": name, "status": "ACTIVE"}
